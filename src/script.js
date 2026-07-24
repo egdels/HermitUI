@@ -26,6 +26,61 @@
                 .replace(/&amp;/g, '&');
         }
 
+        // ========== Sanitizer policy for model-generated HTML ==========
+        // KaTeX's MathML output wraps the formula in <semantics> and carries the original
+        // TeX in an <annotation>. Neither tag is in DOMPurify's default ALLOWED_TAGS (they
+        // live in its mathMlDisallowed set, which is only consulted for namespace checks),
+        // and neither is in FORBID_CONTENTS — so with KEEP_CONTENT on they get unwrapped and
+        // the TeX ends up as a bare text node directly inside <math>, which no spec accounts
+        // for. Chromium happens not to paint it, but that is a browser's tolerance for stray
+        // MathML text, not a guarantee. Both tags are inert wrappers; allowing them keeps the
+        // annotation where it belongs. tests/e2e_rendering.py asserts the TeX never paints.
+        const AI_SANITIZE = { ADD_TAGS: ["semantics", "annotation"] };
+
+        // Two rules applied to every sanitized fragment:
+        //  - Links open in a new tab. Nothing here is saved anywhere, so a same-tab
+        //    navigation away from the page destroys the conversation with no way back.
+        //  - Remote images are held back. Rendering one is an outbound request from an app
+        //    whose entire claim is that nothing leaves the machine, so a poisoned document
+        //    in context (or a hostile model) must not be able to beacon out by emitting
+        //    ![](https://…?data=…). Locally-read attachments are data:/blob: and unaffected;
+        //    a held-back image is one click away via wireBlockedImages().
+        DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+            if (node.tagName === "A" && node.hasAttribute("href")) {
+                node.setAttribute("target", "_blank");
+                node.setAttribute("rel", "noopener noreferrer");
+            }
+            if (node.tagName === "IMG" && node.hasAttribute("src")) {
+                const src = node.getAttribute("src");
+                if (!/^(?:data:|blob:)/i.test(src)) {
+                    node.removeAttribute("src");
+                    node.setAttribute("data-blocked-src", src);
+                    node.classList.add("blocked-image");
+                }
+            }
+        });
+
+        // Turn each held-back image into a click-to-load button. Loading is always the
+        // user's explicit decision, and the URL is shown before they make it.
+        function wireBlockedImages(container) {
+            container.querySelectorAll("img.blocked-image[data-blocked-src]").forEach((img) => {
+                if (img.dataset.blockedWired) return;
+                img.dataset.blockedWired = "1";
+                const url = img.getAttribute("data-blocked-src");
+                const btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "blocked-image-btn";
+                btn.title = url;
+                btn.textContent = `🚫 Remote image blocked — click to load (${url.slice(0, 60)}${url.length > 60 ? "…" : ""})`;
+                btn.addEventListener("click", () => {
+                    img.setAttribute("src", url);
+                    img.classList.remove("blocked-image"); // .blocked-image keeps it hidden
+                    btn.remove();
+                });
+                img.before(btn);
+            });
+        }
+
         marked.use({
             renderer: {
                 code(codeArg, infoArg) {
@@ -167,6 +222,14 @@
                 probe.innerHTML = DOMPurify.sanitize(svg, {
                     USE_PROFILES: { svg: true, svgFilters: true },
                     ADD_TAGS: ['style']
+                });
+                // Mermaid themes its SVG through that self-generated stylesheet, and
+                // classDef/style directives in the diagram source end up inside it — so an
+                // external url() there would be an outbound request driven by model output.
+                // Fragment refs (url(#arrowhead)) are what mermaid legitimately needs;
+                // anything else is dropped.
+                probe.querySelectorAll('style').forEach((styleEl) => {
+                    styleEl.textContent = styleEl.textContent.replace(/url\(\s*['"]?(?!#)[^)]*\)/gi, 'none');
                 });
                 return probe.querySelector('svg') ? probe.innerHTML : null;
             } catch (e) {
@@ -379,12 +442,60 @@ Rules:
             return CLOUD_PROVIDERS.find(p => host === p || host.endsWith("." + p)) || null;
         }
 
+        // Hosts that keep the conversation on the user's own machine or LAN. The banner
+        // triggers on "not local" rather than "known cloud", so a provider nobody thought to
+        // list — or an #api= link pointing anywhere at all — still warns. CLOUD_PROVIDERS
+        // above now only decides what to *call* the destination.
+        function isLocalEndpoint(rawUrl) {
+            let host;
+            try { host = new URL(rawUrl).hostname; }
+            catch {
+                try { host = new URL("https://" + rawUrl).hostname; } catch { return false; }
+            }
+            host = host.toLowerCase().replace(/^\[|\]$/g, "");
+            if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+            if (host === "::1") return true;
+            if (/^f[cd][0-9a-f]{2}:/.test(host)) return true;            // IPv6 unique-local
+            // The private-range tests below must only run against a real IPv4 literal —
+            // matched as a prefix they would also accept "192.168.1.20.evil.com".
+            if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
+            if (host === "0.0.0.0") return true;
+            if (/^127\./.test(host)) return true;                        // loopback
+            if (/^10\./.test(host)) return true;                         // RFC1918
+            if (/^192\.168\./.test(host)) return true;                   // RFC1918
+            if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;    // RFC1918
+            if (/^169\.254\./.test(host)) return true;                   // link-local
+            return false;
+        }
+
+        // null when the endpoint keeps data local, otherwise a label for the destination:
+        // the recognized provider name when there is one, else the bare host.
+        function describeRemoteEndpoint(rawUrl) {
+            if (!rawUrl || isLocalEndpoint(rawUrl)) return null;
+            const known = detectCloudProvider(rawUrl);
+            if (known) return known;
+            try { return new URL(rawUrl).host; } catch { /* fall through */ }
+            try { return new URL("https://" + rawUrl).host; } catch { /* fall through */ }
+            return rawUrl;
+        }
+
+        // Browsers block http:// subresources from an https:// page, with loopback exempted.
+        // That is exactly the "hosted demo → LAN server" case, and it otherwise surfaces as
+        // the generic "is your server running?" error, which sends people down the wrong path.
+        function isBlockedMixedContent(rawUrl) {
+            if (location.protocol !== "https:") return false;
+            if (!/^http:\/\//i.test((rawUrl || "").trim())) return false;
+            let host;
+            try { host = new URL(rawUrl).hostname.toLowerCase(); } catch { return false; }
+            return !(host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host) || host === "[::1]" || host === "::1");
+        }
+
         function updateMainCloudWarning() {
-            const match = detectCloudProvider(API_URL);
+            const label = describeRemoteEndpoint(API_URL);
             const banner = document.getElementById("mainScreenCloudWarning");
             if (banner) {
-                if (match) {
-                    document.getElementById("mainCloudProviderName").textContent = match;
+                if (label) {
+                    document.getElementById("mainCloudProviderName").textContent = label;
                     banner.style.display = "flex";
                 } else {
                     banner.style.display = "none";
@@ -414,12 +525,23 @@ Rules:
         // Apply a free-form system prompt (settings edit, or one restored by an
         // import) and keep the persona dropdown honest: snap back to a preset when
         // the text matches one, otherwise show a temporary "⚡ Custom" entry.
+        // Every persona embeds today's date, so an export reopened on a later day no longer
+        // matches its preset byte-for-byte. Compare with the date line normalized away.
+        const PROMPT_DATE_LINE = /^Today is .*$/m;
+        function personaKeyFor(prompt) {
+            const norm = s => String(s).replace(PROMPT_DATE_LINE, "Today is <date>");
+            const target = norm(prompt);
+            return Object.keys(PERSONAS).find(k => norm(PERSONAS[k].prompt) === target) || null;
+        }
+
         function applySystemPrompt(newPrompt) {
-            SYSTEM_PROMPT = newPrompt;
+            const matchingKey = personaKeyFor(newPrompt);
+            // On a match adopt the preset's *current* text, so an imported chat doesn't pin
+            // the model to the date the export was written on.
+            SYSTEM_PROMPT = matchingKey ? PERSONAS[matchingKey].prompt : newPrompt;
             messages[0].content = SYSTEM_PROMPT;
             document.getElementById("settingSystem").value = SYSTEM_PROMPT;
 
-            const matchingKey = Object.keys(PERSONAS).find(k => PERSONAS[k].prompt === newPrompt);
             if (matchingKey) {
                 activePersona = matchingKey;
                 personaSelect.value = matchingKey;
@@ -488,10 +610,29 @@ Rules:
             renderChips();
         }
 
+        // Extension allowlist rather than MIME sniffing, because the OS MIME table is
+        // actively wrong for source files: ".ts" maps to video/mp2t on most systems, so a
+        // TypeScript file would otherwise be rejected as "not a text or image file".
+        // Kept inside the function so it stays self-contained for tests/extract.mjs.
         function isTextFile(file) {
             if (file.type.startsWith("text/")) return true;
-            const textExtensions = ['.json', '.js', '.py', '.md', '.html', '.css', '.txt', '.csv', '.xml', '.yml', '.yaml', '.sh'];
-            return textExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
+            const textExtensions = [
+                '.txt', '.md', '.markdown', '.rst', '.log', '.csv', '.tsv',
+                '.json', '.jsonc', '.json5', '.xml', '.yml', '.yaml', '.toml', '.ini', '.cfg', '.conf', '.env', '.properties',
+                '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.vue', '.svelte',
+                '.html', '.htm', '.css', '.scss', '.sass', '.less',
+                '.py', '.rb', '.php', '.pl', '.lua', '.r',
+                '.c', '.h', '.cc', '.cpp', '.hpp', '.cxx', '.cs', '.java', '.kt', '.kts', '.swift', '.mm',
+                '.go', '.rs', '.zig', '.dart', '.scala', '.clj', '.ex', '.exs', '.erl', '.hs',
+                '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd',
+                '.sql', '.graphql', '.gql', '.proto', '.tf', '.tfvars',
+                '.diff', '.patch', '.gitignore', '.dockerignore', '.editorconfig'
+            ];
+            // Extensionless files that are text in practice (Dockerfile, Makefile, LICENSE…).
+            const textFilenames = ['dockerfile', 'makefile', 'rakefile', 'gemfile', 'procfile', 'license', 'readme', 'changelog', 'authors', 'notice'];
+            const name = file.name.toLowerCase();
+            if (textFilenames.includes(name.replace(/\.[^.]*$/, "")) && !/\.(png|jpe?g|gif|webp|pdf|zip|gz|exe|bin)$/.test(name)) return true;
+            return textExtensions.some(ext => name.endsWith(ext));
         }
 
         // Raster formats accepted by the OpenAI vision content-array. SVG is excluded:
@@ -573,6 +714,8 @@ Rules:
                     pendingFileReads--;
                     showToast(`Could not read file ${file.name}.`);
                 };
+                // Without this an aborted read leaks the counter and blocks every later send.
+                reader.onabort = () => { pendingFileReads--; };
                 reader.readAsText(file);
             }
         }
@@ -664,18 +807,25 @@ Rules:
                     return;
                 }
             }
+            // Accel is Ctrl on Windows/Linux and ⌘ on macOS — without metaKey the shortcuts
+            // simply don't exist for Mac users.
+            const accel = e.ctrlKey || e.metaKey;
+            if (!accel) return;
+            // Never steal a keystroke from a field inside an open dialog: Ctrl+E while
+            // editing the System Prompt used to fire Export mid-edit.
+            if (document.querySelector(".modal-overlay.active")) return;
             // Ctrl+Shift+O for New Chat: Ctrl+Shift+N is reserved by Chromium
             // (incognito window) and can never reach the page there.
-            if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'o') {
+            if (e.shiftKey && e.key.toLowerCase() === 'o') {
                 e.preventDefault();
                 document.getElementById("clearBtn").click();
-            } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 's') {
+            } else if (e.shiftKey && e.key.toLowerCase() === 's') {
                 e.preventDefault();
                 document.getElementById("summarizeBtn").click();
-            } else if (e.ctrlKey && e.key.toLowerCase() === 'e') {
+            } else if (e.key.toLowerCase() === 'e') {
                 e.preventDefault();
                 document.getElementById("exportBtn").click();
-            } else if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'i') {
+            } else if (!e.shiftKey && e.key.toLowerCase() === 'i') {
                 e.preventDefault();
                 document.getElementById("importBtn").click();
             }
@@ -752,8 +902,11 @@ Rules:
         const settingsModal = document.getElementById("settingsModal");
         
         function checkCloudWarning() {
-            const isCloud = detectCloudProvider(document.getElementById("settingUrl").value) !== null;
-            document.getElementById("cloudWarning").style.display = isCloud ? "flex" : "none";
+            const url = document.getElementById("settingUrl").value;
+            const label = describeRemoteEndpoint(url);
+            document.getElementById("cloudWarning").style.display = label ? "flex" : "none";
+            if (label) document.getElementById("cloudWarningTarget").textContent = label;
+            document.getElementById("mixedContentWarning").style.display = isBlockedMixedContent(url) ? "flex" : "none";
         }
         document.getElementById("settingUrl").addEventListener("input", checkCloudWarning);
 
@@ -1131,7 +1284,12 @@ Rules:
             }
             setWllamaLoadBusy(true);
             try { await loadWllamaModel([file], file.name); }
-            finally { setWllamaLoadBusy(false); }
+            finally {
+                setWllamaLoadBusy(false);
+                // Clear the picker so re-selecting the *same* file still fires "change" —
+                // otherwise reloading a model means picking a different one first.
+                e.target.value = "";
+            }
         });
 
         // Accept the three URL shapes people realistically paste and normalize them
@@ -1392,12 +1550,59 @@ Rules:
         });
         // @wllama:end
         // ========== New Chat ==========
-        document.getElementById("clearBtn").addEventListener("click", () => {
-            if (isWaiting) return; // Don't clear during generation
+        // Nothing is recoverable once cleared and Ctrl+Shift+O is one keystroke away, so a
+        // non-empty chat asks first — the same bargain the import flow already makes.
+        const newChatConfirmModal = document.getElementById("newChatConfirmModal");
+        trapModalFocus(newChatConfirmModal);
+
+        function hasConversation() {
+            return messages.some(m => m.role !== "system");
+        }
+
+        // Clearing the chat has to clear what was being composed too — a draft, the context
+        // pane's text and the file chips otherwise survive into the "new" chat.
+        function resetComposer() {
+            inputField.value = "";
+            inputField.style.height = "auto";
+            if (contextInput) { contextInput.value = ""; contextInput.style.height = "auto"; }
+            if (contextPane) contextPane.style.display = "none";
+            if (attachContextBtn) attachContextBtn.classList.remove("active");
+            attachedFiles = [];
+            renderChips();
+        }
+
+        function startNewChat() {
             // New chat inherits current active persona
             messages = [{"role": "system", "content": SYSTEM_PROMPT}];
+            resetComposer();
             showEmptyState();
             updateGlobalStats("0", "0", "0.0", "0.0");
+            userScrolledUp = false;
+            jumpBottomBtn.classList.remove("active");
+        }
+
+        document.getElementById("clearBtn").addEventListener("click", () => {
+            if (isWaiting) return; // Don't clear during generation
+            if (hasConversation()) { openModalEl(newChatConfirmModal); return; }
+            startNewChat();
+        });
+        document.getElementById("newChatConfirmBtn").addEventListener("click", () => {
+            closeModalEl(newChatConfirmModal);
+            startNewChat();
+        });
+        document.getElementById("newChatCancelBtn").addEventListener("click", () => {
+            closeModalEl(newChatConfirmModal);
+        });
+        newChatConfirmModal.addEventListener("click", (e) => {
+            if (e.target === newChatConfirmModal) closeModalEl(newChatConfirmModal);
+        });
+
+        // The conversation lives only in this tab, so a refresh or an accidental Ctrl+W ends
+        // it for good. Browsers supply their own wording; this only opts into the prompt.
+        window.addEventListener("beforeunload", (e) => {
+            if (!hasConversation()) return;
+            e.preventDefault();
+            e.returnValue = "";
         });
 
         let toastTimeout = null;
@@ -1407,6 +1612,10 @@ Rules:
                 toast = document.createElement("div");
                 toast.id = "toastNotification";
                 toast.className = "toast";
+                // Toasts carry real outcomes (import succeeded, copy failed, config applied
+                // from a URL); without a live region a screen reader never hears any of it.
+                toast.setAttribute("role", "status");
+                toast.setAttribute("aria-live", "polite");
                 document.body.appendChild(toast);
             }
             toast.textContent = message;
@@ -1463,7 +1672,11 @@ Rules:
         // Normalize a base URL (or a pasted full chat endpoint) to the given API path.
         function apiEndpoint(base, path) {
             let url = base.trim().replace(/\/+$/, "");
-            if (url.endsWith("/chat/completions")) url = url.slice(0, -"/chat/completions".length);
+            // Tolerate a pasted full endpoint of any known kind, so a base left pointing at
+            // /models can't produce ".../models/chat/completions". Longest suffix first.
+            for (const known of ["/chat/completions", "/completions", "/models"]) {
+                if (url.endsWith(known)) { url = url.slice(0, -known.length); break; }
+            }
             if (!url.endsWith(path)) url += path;
             return url;
         }
@@ -1895,7 +2108,10 @@ Rules:
         }
 
         // ========== Think-Tag Parser ==========
-        function parseThinkSegments(rawText) {
+        // isFinal: while streaming, a half-arrived tag must not flash as literal text, so a
+        // trailing tag prefix is held back. Once the message is complete there is nothing
+        // left to arrive, and holding it back would permanently eat a real trailing "<".
+        function parseThinkSegments(rawText, isFinal = false) {
             let segments = [];
             let currentIdx = 0;
             const openRegex = /<\|?(?:think|thought|reasoning|thought_start)[^>]*>/gi;
@@ -1914,17 +2130,19 @@ Rules:
                     // must not flash as literal text before its '>' arrives.
                     const partials = ['<think', '<thought', '<reasoning', '<|thought_start', '<|thought_end',
                                       '</think', '</thought', '</reasoning'];
-                    const lowerContent = textContent.toLowerCase();
-                    for (let p of partials) {
-                        let found = false;
-                        for (let i = p.length - 1; i >= 1; i--) {
-                            if (lowerContent.endsWith(p.substring(0, i))) {
-                                textContent = textContent.substring(0, textContent.length - i);
-                                found = true;
-                                break;
+                    if (!isFinal) {
+                        const lowerContent = textContent.toLowerCase();
+                        for (let p of partials) {
+                            let found = false;
+                            for (let i = p.length - 1; i >= 1; i--) {
+                                if (lowerContent.endsWith(p.substring(0, i))) {
+                                    textContent = textContent.substring(0, textContent.length - i);
+                                    found = true;
+                                    break;
+                                }
                             }
+                            if (found) break;
                         }
-                        if (found) break;
                     }
                     if (textContent.length > 0) {
                         segments.push({ type: 'text', content: textContent });
@@ -1955,7 +2173,7 @@ Rules:
 
         // ========== UI Render Helper ==========
         function updateMessageUI(ctx, isFinal) {
-            let parsedSegments = parseThinkSegments(ctx.fullRawText);
+            let parsedSegments = parseThinkSegments(ctx.fullRawText, isFinal);
             
             if (ctx.aiReasoning) {
                 parsedSegments.unshift({
@@ -2037,9 +2255,10 @@ Rules:
                     // actually changed: during streaming only the newest segment
                     // grows, so settled segments cost nothing per throttle tick.
                     if (domSeg.renderedContent !== seg.content) {
-                        domSeg.el.innerHTML = DOMPurify.sanitize(marked.parse(seg.content));
+                        domSeg.el.innerHTML = DOMPurify.sanitize(marked.parse(seg.content), AI_SANITIZE);
                         domSeg.renderedContent = seg.content;
                         injectCopyButtons(domSeg.el);
+                        wireBlockedImages(domSeg.el);
                     }
                 } else if (seg.type === 'think') {
                     if (domSeg.renderedContent !== seg.content) {
@@ -2084,6 +2303,15 @@ Rules:
                 ctx.responseContainer.appendChild(ctx.typingIndicator);
             }
             
+            // A reply stopped at the max-tokens limit otherwise looks like a complete answer.
+            if (isFinal && ctx.finishReason === "length" && !ctx.truncationNoticeShown) {
+                ctx.truncationNoticeShown = true;
+                const note = document.createElement("div");
+                note.className = "truncation-notice";
+                note.textContent = "⚠️ Cut off at the max-tokens limit — the reply is incomplete.";
+                ctx.responseContainer.appendChild(note);
+            }
+
             // Diagrams only render once the message is complete; while streaming the
             // fence stays visible as a plain code block.
             if (isFinal) renderMermaidBlocks(ctx.responseContainer);
@@ -2189,6 +2417,9 @@ Rules:
             line.style.color = WLLAMA_LOG_COLORS[level] || WLLAMA_LOG_COLORS.log;
             line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
             panel.appendChild(line);
+            // Native llama.cpp logs at Debug verbosity are a firehose — cap the panel so a
+            // long session can't grow the DOM without bound.
+            while (panel.childElementCount > 500) panel.removeChild(panel.firstElementChild);
             panel.scrollTop = panel.scrollHeight;
         }
 
@@ -2376,9 +2607,10 @@ Rules:
                         updateGlobalStats(promptTokens || "...", estTokens, currentTps, currentDuration.toFixed(1), !promptTokens, true);
                     });
                 },
-                onDone: (pt, ct) => {
+                onDone: (pt, ct, finishReason) => {
                     promptTokens = pt;
                     completionTokens = ct;
+                    ctx.finishReason = finishReason || null;
                     updateMessageUI(ctx, true);
                     onFinal(ctx, false);
                     finishGeneration();
@@ -2436,7 +2668,9 @@ Rules:
                             }
                         }
                     };
-                    const temperature = payload.temperature || 0.7;
+                    // ?? not ||: temperature 0 (greedy decoding) is a deliberate setting and
+                    // must not fall through to the 0.7 default.
+                    const temperature = payload.temperature ?? 0.7;
                     // Optional sampling params (Advanced parameters) are forwarded when the
                     // payload carries them; penalties are not supported by the wllama API.
                     const sampling = {};
@@ -2506,6 +2740,8 @@ Rules:
             // @wllama:end
             let promptTokens = 0;
             let completionTokens = 0;
+            let finishReason = null;
+            let sawStreamData = false;
             const chatUrl = apiEndpoint(API_URL, "/chat/completions");
 
             try {
@@ -2528,6 +2764,35 @@ Rules:
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder("utf-8");
                 let buffer = "";
+                // Kept only until the first real chunk arrives, so a backend that ignored
+                // `stream: true` can still be salvaged after the loop without holding a
+                // second copy of a long streamed answer in memory.
+                let rawBody = "";
+
+                // Pull usage/finish_reason/content out of one decoded payload. Shared by the
+                // SSE path and the non-streaming fallback below.
+                const readUsage = (data) => {
+                    if (!data.usage) return;
+                    promptTokens = data.usage.prompt_tokens || promptTokens;
+                    completionTokens = data.usage.completion_tokens || completionTokens;
+                };
+                const emit = (reasoning, content) => {
+                    if (!reasoning && !content) return;
+                    sawStreamData = true;
+                    // A render failure must not kill an otherwise healthy stream.
+                    try { onChunk(reasoning || "", content || "", promptTokens, completionTokens); }
+                    catch (e) { console.error("Render error while streaming:", e); }
+                };
+                // Some backends (llama.cpp, LM Studio) report a mid-stream failure as an
+                // error frame rather than an HTTP status — a KV-cache overflow arrives this
+                // way. Left unhandled the answer just stops with nothing shown.
+                const raiseIfError = (data) => {
+                    if (!data.error) return;
+                    const msg = typeof data.error === "string"
+                        ? data.error
+                        : (data.error.message || "Unknown server error");
+                    throw new Error(msg);
+                };
 
                 const processLine = (line) => {
                     // SSE allows "data:" with or without a following space.
@@ -2535,37 +2800,60 @@ Rules:
                     const dataStr = line.slice(5).trim();
                     if (dataStr === "" || dataStr === "[DONE]") return;
 
-                    try {
-                        const data = JSON.parse(dataStr);
-                        const delta = data.choices && data.choices[0] && data.choices[0].delta;
+                    let data;
+                    try { data = JSON.parse(dataStr); }
+                    catch (e) { console.error("Stream parse error:", e, "Line:", line); return; }
 
-                        const reasoningChunk = delta && (delta.reasoning_content || delta.reasoning || delta.thinking || "");
-                        const contentChunk = delta && delta.content;
-
-                        if (data.usage) {
-                            promptTokens = data.usage.prompt_tokens || promptTokens;
-                            completionTokens = data.usage.completion_tokens || completionTokens;
-                        }
-
-                        if (reasoningChunk || contentChunk) {
-                            onChunk(reasoningChunk || "", contentChunk || "", promptTokens, completionTokens);
-                        }
-                    } catch (e) { console.error("Stream parse error:", e, "Line:", line); }
+                    raiseIfError(data);
+                    const choice = data.choices && data.choices[0];
+                    if (choice && choice.finish_reason) finishReason = choice.finish_reason;
+                    readUsage(data);
+                    const delta = choice && choice.delta;
+                    emit(delta && (delta.reasoning_content || delta.reasoning || delta.thinking || ""),
+                         delta && delta.content);
                 };
 
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
 
-                    buffer += decoder.decode(value, { stream: true });
+                    const text = decoder.decode(value, { stream: true });
+                    if (!sawStreamData && rawBody.length < 1048576) rawBody += text;
+                    buffer += text;
                     const lines = buffer.split('\n');
                     buffer = lines.pop();
 
                     for (const line of lines) processLine(line);
                 }
                 if (buffer.trim()) processLine(buffer);
-                
-                onDone(promptTokens, completionTokens);
+
+                // No SSE frame ever produced content: either the server ignored
+                // `stream: true` or a proxy buffered the whole thing into one JSON body.
+                // Previously this path silently produced nothing at all — the user pressed
+                // Send and saw neither text nor an error.
+                if (!sawStreamData) {
+                    const trimmed = rawBody.trim();
+                    let data = null;
+                    if (trimmed.startsWith("{")) {
+                        try { data = JSON.parse(trimmed); } catch { /* not a JSON body */ }
+                    }
+                    if (data) {
+                        raiseIfError(data);
+                        const choice = data.choices && data.choices[0];
+                        const msg = choice && choice.message;
+                        if (choice && choice.finish_reason) finishReason = choice.finish_reason;
+                        readUsage(data);
+                        if (msg) {
+                            emit(msg.reasoning_content || msg.reasoning || msg.thinking || "", msg.content);
+                        }
+                    }
+                }
+                if (!sawStreamData) {
+                    throw new Error("The server accepted the request but returned no content. "
+                        + "It may not support streaming at this endpoint — check the API Base URL.");
+                }
+
+                onDone(promptTokens, completionTokens, finishReason);
             } catch (error) {
                 onError(error);
             }
@@ -2594,9 +2882,11 @@ Rules:
             
             const contextPane = document.getElementById("context-pane");
             const contextInput = document.getElementById("context-input");
-            const isPaneVisible = contextPane && contextPane.style.display !== "none";
-            const contextText = isPaneVisible && contextInput ? contextInput.value.trim() : "";
-            const hasFiles = isPaneVisible && typeof attachedFiles !== "undefined" && attachedFiles.length > 0;
+            // Deliberately not gated on the pane being *visible*. Collapsing it used to make
+            // send silently drop the context text and every attachment — and then clear them
+            // anyway, so the work was gone with no warning.
+            const contextText = contextInput ? contextInput.value.trim() : "";
+            const hasFiles = typeof attachedFiles !== "undefined" && attachedFiles.length > 0;
 
             if (!isRegenerate) {
                 if (!text && !contextText && !hasFiles) return;
@@ -2768,7 +3058,8 @@ Rules:
             } else if (text) {
                 // Empty AI bubbles (streaming placeholders) are overwritten by the
                 // caller immediately — skip the pointless sanitize/mermaid pass.
-                contentDiv.innerHTML = DOMPurify.sanitize(text); // AI messages may contain HTML
+                contentDiv.innerHTML = DOMPurify.sanitize(text, AI_SANITIZE); // AI messages may contain HTML
+                wireBlockedImages(contentDiv);
                 renderMermaidBlocks(contentDiv);
             }
             
@@ -2930,7 +3221,7 @@ Rules:
             const key = (params.get("key") || "").trim();
             if (key) {
                 API_KEY = key;
-                applied.push("API key (note: it stays in your browser history)");
+                applied.push("API key (cleared from the address bar; still in browser history)");
             }
             const persona = (params.get("persona") || "").trim();
             if (persona && PERSONAS[persona]) {
@@ -2945,5 +3236,14 @@ Rules:
             }
             // typeof-guard keeps this valid in the builds where the wllama block is stripped.
             if (typeof handleWllamaHashParams === "function") handleWllamaHashParams(params);
+
+            // The key is the one fragment value worth hiding again — it would otherwise sit
+            // in the address bar for every screenshot and shoulder-surfer. Everything else
+            // stays, so reloading still reapplies the rest of the configuration.
+            if (key) {
+                params.delete("key");
+                const rest = params.toString();
+                history.replaceState(null, "", location.pathname + location.search + (rest ? "#" + rest : ""));
+            }
         }
         applyHashConfig();

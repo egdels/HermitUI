@@ -1,4 +1,7 @@
 :root {
+            /* Tells the browser to theme native UI (scrollbars, number-input spinners,
+               file pickers) to match; the dark block below flips it. */
+            color-scheme: light;
             --bg-gradient: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
             --chat-bg: rgba(255, 255, 255, 0.95);
             --text-main: #1f2937;
@@ -19,14 +22,18 @@
             display: flex;
             flex-direction: column;
             height: 100vh;
+            /* dvh tracks the mobile URL bar; without it the composer sits below the fold. */
+            height: 100dvh;
         }
 
         header {
-            padding: 12px 24px;
+            padding: 12px clamp(12px, 3vw, 24px);
             z-index: 10;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
             background: rgba(255, 255, 255, 0.8);
             backdrop-filter: blur(12px);
             border-bottom: 1px solid rgba(255, 255, 255, 0.4);
@@ -37,6 +44,8 @@
             display: flex;
             align-items: center;
             gap: 12px;
+            flex-wrap: wrap;
+            min-width: 0;
         }
 
         header h2 { 
@@ -62,6 +71,11 @@
             display: inline-flex;
             align-items: center;
             gap: 4px;
+            /* The URL can be arbitrarily long — clip it rather than blow out the header. */
+            max-width: min(100%, 46ch);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .version-badge {
@@ -82,14 +96,18 @@
         .header-actions {
             display: flex;
             gap: 8px;
+            flex-wrap: wrap;
         }
 
+        /* A normal flex child rather than an absolutely-centred overlay: the old version sat
+           on top of the title and the icon row as soon as the viewport got narrow. flex:1
+           keeps it visually centred while there is room and lets the header wrap when not. */
         .header-center {
             display: flex;
             gap: 8px;
-            position: absolute;
-            left: 50%;
-            transform: translateX(-50%);
+            flex: 1 1 auto;
+            justify-content: center;
+            flex-wrap: wrap;
         }
 
         .header-btn {
@@ -156,7 +174,7 @@
             justify-content: center;
             overflow: hidden;
             width: 100%;
-            padding: 24px 20px 30px 20px;
+            padding: clamp(10px, 2vw, 24px) clamp(8px, 2vw, 20px) clamp(12px, 2vw, 30px);
         }
 
         #chat-container {
@@ -180,9 +198,11 @@
         }
 
         .msg-wrapper {
-            padding: 24px 40px;
+            /* Fluid rather than fixed: 80px of horizontal padding plus the avatar left
+               almost nothing for text on a phone. */
+            padding: clamp(14px, 3vw, 24px) clamp(14px, 5vw, 40px);
             display: flex;
-            gap: 24px;
+            gap: clamp(12px, 3vw, 24px);
             animation: fadeIn 0.4s ease-out forwards;
             opacity: 0;
             transform: translateY(10px);
@@ -222,13 +242,13 @@
         }
 
         .avatar {
-            width: 44px;
-            height: 44px;
+            width: clamp(34px, 9vw, 44px);
+            height: clamp(34px, 9vw, 44px);
             border-radius: 12px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 24px;
+            font-size: clamp(18px, 5vw, 24px);
             flex-shrink: 0;
             box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
         }
@@ -423,7 +443,7 @@
         /* Input Container */
         .input-container {
             position: relative;
-            padding: 16px 40px 24px 40px;
+            padding: 16px clamp(12px, 5vw, 40px) 24px;
             background: transparent;
             display: flex;
             flex-direction: column;
@@ -585,6 +605,9 @@
             font-size: 0.8rem;
             color: #6b7280;
             align-items: center;
+            /* Four stats plus separators overflow a phone without wrapping. */
+            flex-wrap: wrap;
+            justify-content: center;
             gap: 16px;
             font-family: ui-monospace, SFMono-Regular, monospace;
             box-shadow: 0 2px 4px rgba(0,0,0,0.02);
@@ -937,8 +960,42 @@
             overflow-x: auto;
         }
 
+        /* Remote images in model output are held back until the user asks for them —
+           rendering one would be an outbound request from an app that promises none.
+           The <img> stays in the DOM (hidden) so the click handler can just restore src. */
+        .blocked-image { display: none; }
+        .blocked-image-btn {
+            display: block;
+            max-width: 100%;
+            margin: 8px 0;
+            padding: 8px 12px;
+            border: 1px dashed #d1d5db;
+            border-radius: 8px;
+            background: rgba(0,0,0,0.03);
+            color: #6b7280;
+            font-family: 'Inter', system-ui, sans-serif;
+            font-size: 0.8rem;
+            text-align: left;
+            cursor: pointer;
+            overflow-wrap: anywhere;
+        }
+        .blocked-image-btn:hover { border-color: var(--primary); color: var(--primary); }
+
+        /* Shown when a reply stopped at the max-tokens limit rather than finishing. */
+        .truncation-notice {
+            margin-top: 12px;
+            padding: 8px 12px;
+            border-radius: 8px;
+            background: rgba(254, 243, 199, 0.7);
+            border: 1px solid #fcd34d;
+            color: #92400e;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
 /* Dark Mode Overrides */
         :root[data-theme="dark"] {
+            color-scheme: dark;
             --bg-gradient: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
             --chat-bg: rgba(30, 41, 59, 0.85);
             --text-main: #f8fafc;
@@ -1099,6 +1156,28 @@
         :root[data-theme="dark"] .input-shell {
             background: var(--surface);
             border-color: var(--border-strong);
+        }
+        :root[data-theme="dark"] .blocked-image-btn {
+            background: rgba(255,255,255,0.04);
+            border-color: var(--border-strong);
+            color: var(--text-muted);
+        }
+        :root[data-theme="dark"] .truncation-notice {
+            background: rgba(120, 53, 15, 0.35);
+            border-color: #b45309;
+            color: #fcd34d;
+        }
+
+        /* The only media query in the file, and not a breakpoint: several animations here
+           loop forever (form glow, think glow, cursor blink, the indeterminate progress
+           bar), which is exactly what this preference exists to stop. */
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.001ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.001ms !important;
+                scroll-behavior: auto !important;
+            }
         }
         /* @wllama:start */
         /* ===== Quake-style debug console (slides down from the top) ===== */

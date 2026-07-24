@@ -9,7 +9,8 @@ import { check, checkThrows, section, report } from "./check.mjs";
 
 const {
     parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint,
-    detectCloudProvider, isTextFile, isImageFile, modelSupportsVision,
+    detectCloudProvider, isLocalEndpoint, describeRemoteEndpoint,
+    isTextFile, isImageFile, modelSupportsVision,
     modelReportsVision, extractModelId, normalizeGgufUrl, detectTemplateFromArch,
     buildWllamaPrompt,
 } = H;
@@ -46,6 +47,17 @@ section("1. think-tag parsing");
 
     check("<reasoning> is recognized",
         types(parseThinkSegments("<reasoning>r</reasoning>a")) === "think,text");
+
+    // Holding back a trailing tag prefix is right mid-stream and wrong once the message is
+    // complete — nothing more is coming, so a real trailing "<" must survive to the screen.
+    const finalText = s => parseThinkSegments(s, true).map(x => x.content).join("");
+    check("streaming still hides a half-arrived tag",
+        parseThinkSegments("x <")[0].content === "x ", parseThinkSegments("x <")[0].content);
+    check("final render keeps a trailing '<'", finalText("x <") === "x <", finalText("x <"));
+    check("final render keeps a trailing '</'", finalText("5 </") === "5 </", finalText("5 </"));
+    check("final render keeps a trailing '<t'", finalText("use <t") === "use <t", finalText("use <t"));
+    check("final render still splits real think tags",
+        types(parseThinkSegments("<think>a</think>b", true)) === "think,text");
 
     // Streaming: a half-arrived tag is withheld from the rendered text segment.
     const partialOpen = parseThinkSegments("Answer so far <thin");
@@ -87,6 +99,11 @@ section("3. API endpoint normalization");
         apiEndpoint("http://localhost:1234/v1/chat/completions", "/chat/completions") === "http://localhost:1234/v1/chat/completions");
     check("a pasted chat endpoint still resolves /models",
         apiEndpoint("http://localhost:1234/v1/chat/completions", "/models") === "http://localhost:1234/v1/models");
+    // A base left pointing at /models used to yield ".../models/chat/completions".
+    check("a pasted models endpoint resolves /chat/completions",
+        apiEndpoint("http://localhost:1234/v1/models", "/chat/completions") === "http://localhost:1234/v1/chat/completions");
+    check("a pasted legacy /completions endpoint is not doubled",
+        apiEndpoint("http://localhost:1234/v1/completions", "/chat/completions") === "http://localhost:1234/v1/chat/completions");
 }
 
 // The banner claims data leaves the machine, so a false positive is a lie to the user:
@@ -107,6 +124,30 @@ section("4. cloud provider detection");
     check("unparseable input yields null", detectCloudProvider("") === null);
 }
 
+// The banner triggers on "not local", not on "known cloud" — a provider nobody listed
+// (or an #api= link pointing anywhere) has to warn too. CLOUD_PROVIDERS only supplies
+// the friendly name once the endpoint is already known to be remote.
+section("4b. local vs remote endpoint classification");
+{
+    for (const local of ["http://localhost:1234/v1", "http://LOCALHOST:1234/v1", "http://127.0.0.1:8080/v1",
+                         "http://192.168.1.20:8080/v1", "http://10.0.0.5/v1", "http://172.16.4.1/v1",
+                         "http://172.31.255.9/v1", "http://169.254.1.1/v1", "http://nas.local:1234/v1"]) {
+        check(`local: ${local}`, isLocalEndpoint(local) === true, local);
+    }
+    for (const remote of ["https://api.openai.com/v1", "https://evil.example.com/v1",
+                          "http://172.32.0.1/v1", "http://11.0.0.1/v1", "https://192.168.1.20.evil.com/v1"]) {
+        check(`remote: ${remote}`, isLocalEndpoint(remote) === false, remote);
+    }
+
+    check("local endpoints produce no warning label",
+        describeRemoteEndpoint("http://localhost:1234/v1") === null);
+    check("known provider keeps its friendly name",
+        describeRemoteEndpoint("https://api.openai.com/v1") === "openai.com");
+    check("unlisted remote host still warns, labelled by host",
+        describeRemoteEndpoint("https://api.some-new-provider.io/v1") === "api.some-new-provider.io");
+    check("empty input produces no label", describeRemoteEndpoint("") === null);
+}
+
 // Attachment gating: text files are inlined into the prompt, images go into the
 // multimodal content array, everything else is rejected.
 section("5. attachment file-type gating");
@@ -115,6 +156,18 @@ section("5. attachment file-type gating");
     check("known extension accepted without a MIME type", isTextFile(file("main.py")));
     check("extension match is case-insensitive", isTextFile(file("NOTES.MD")));
     check("binary rejected", isTextFile(file("app.bin", "application/octet-stream")) === false);
+    // The OS MIME table is wrong for source files (".ts" is video/mp2t), so these arrive
+    // with a useless or misleading type and must be judged on the extension alone.
+    for (const name of ["main.ts", "App.tsx", "lib.rs", "server.go", "Main.java", "a.c", "b.cpp",
+                        "x.h", "q.sql", "pyproject.toml", "app.log", "config.ini", "Chart.vue"]) {
+        check(`source file accepted: ${name}`, isTextFile(file(name)) === true, name);
+    }
+    check("mislabelled .ts still accepted", isTextFile(file("main.ts", "video/mp2t")) === true);
+    check("extensionless Dockerfile accepted", isTextFile(file("Dockerfile")) === true);
+    check("extensionless Makefile accepted", isTextFile(file("Makefile")) === true);
+    check("readme.png is still not text", isTextFile(file("readme.png", "image/png")) === false);
+    check("archive still rejected", isTextFile(file("bundle.zip", "application/zip")) === false);
+    check("model weights still rejected", isTextFile(file("model.gguf")) === false);
     check("png accepted as image", isImageFile(file("a.png", "image/png")));
     check("webp accepted as image", isImageFile(file("a.webp", "image/webp")));
     check("svg deliberately excluded", isImageFile(file("a.svg", "image/svg+xml")) === false);

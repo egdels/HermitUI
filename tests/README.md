@@ -46,6 +46,21 @@ truncation limits.
 
 Every file exits non-zero on failure.
 
+## End-to-end — `e2e_rendering.py`
+
+```bash
+benchmark/.venv/bin/python tests/e2e_rendering.py
+```
+
+Covers the render pipeline and the hardening around it, none of which is reachable from
+the extract-and-evaluate unit tests: math rendering (that KaTeX's `<annotation>` reaches
+the DOM but never the screen — asserted on `innerText`, because the TeX is *always* present
+in `textContent`), remote images being held back behind a click while locally-attached
+`data:` images pass through, links getting `target="_blank"`/`rel="noopener noreferrer"`,
+a real trailing `<` surviving the final render, the max-tokens cutoff notice, an invalid
+mermaid diagram degrading to a code block, the New Chat confirmation and composer reset,
+and the privacy banner firing on *any* non-local endpoint rather than a fixed provider list.
+
 ## End-to-end — `e2e_export_import.py`
 
 ```bash
@@ -61,7 +76,7 @@ payload (asserted on the stubbed `fetch`'s actual body).
 `fetch` is stubbed with a one-chunk SSE stream, so no API server is needed. Reuses the
 `benchmark/` virtualenv rather than adding another one.
 
-**Run `python3 build.py` first** — this test reads `dist/`, not `src/`.
+**Run `python3 build.py` first** — both end-to-end tests read `dist/`, not `src/`.
 
 ## Notes on the format
 

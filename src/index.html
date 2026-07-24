@@ -108,6 +108,21 @@
         </div>
     </div>
 
+    <!-- New Chat Confirmation Modal -->
+    <div class="modal-overlay" id="newChatConfirmModal" role="dialog" aria-modal="true" aria-labelledby="newChatConfirmTitle">
+        <div class="modal">
+            <h3 id="newChatConfirmTitle">➕ Start a new chat?</h3>
+            <p style="margin-bottom: 24px; line-height: 1.6; color: var(--text-main);">
+                This clears the conversation on screen along with anything in the composer.
+                Nothing is saved anywhere, so it cannot be recovered — export it first if you want to keep it.
+            </p>
+            <div class="modal-actions">
+                <button class="cancel-btn" id="newChatCancelBtn">Cancel</button>
+                <button class="primary-btn" id="newChatConfirmBtn">New Chat</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Settings Modal -->
     <div class="modal-overlay" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
         <div class="modal">
@@ -176,11 +191,18 @@
             <div id="cloudWarning" style="display: none; background: rgba(254, 243, 199, 0.8); color: #92400e; padding: 10px 12px; margin-bottom: 12px; border-radius: 8px; font-size: 0.85rem; border: 1px solid #fcd34d; align-items: flex-start; gap: 8px;">
                 <span style="font-size: 1.1rem; flex-shrink: 0;">⚠️</span>
                 <div>
-                    <b>Privacy Warning:</b> You are connecting to a cloud provider. Your chat data will leave your local machine.
+                    <b>Privacy Warning:</b> This endpoint is not on your machine or local network (<b id="cloudWarningTarget"></b>). Your chat data will leave your local machine.
+                </div>
+            </div>
+            <div id="mixedContentWarning" style="display: none; background: rgba(254, 226, 226, 0.85); color: #991b1b; padding: 10px 12px; margin-bottom: 12px; border-radius: 8px; font-size: 0.85rem; border: 1px solid #fca5a5; align-items: flex-start; gap: 8px;">
+                <span style="font-size: 1.1rem; flex-shrink: 0;">🚫</span>
+                <div>
+                    <b>Blocked by your browser:</b> this page is served over HTTPS, so it cannot call a plain <code>http://</code> address other than <code>localhost</code>. Use <code>https://</code>, run HermitUI from a local file, or point it at <code>localhost</code>.
                 </div>
             </div>
             <label for="settingApiKey">API Key</label>
-            <input type="password" id="settingApiKey" value="dummy">
+            <!-- autocomplete=off: without it browsers offer to save this as a website password. -->
+            <input type="password" id="settingApiKey" value="dummy" autocomplete="off">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <span style="display: flex; align-items: center; gap: 6px;">
                     <label for="settingModelInput" style="margin-bottom: 0;">Model Name</label>
@@ -251,7 +273,10 @@
                             <div style="display: flex; justify-content: space-between; align-items: center;">
                                 <span style="font-size: 0.85rem; font-weight: 600; color: #6b7280; display: flex; align-items: center; gap: 6px;">📎 Attach Data or Files</span>
                                 <button type="button" id="add-file-btn" style="background: var(--primary); color: white; border: none; padding: 6px 12px; border-radius: 8px; font-size: 0.8rem; cursor: pointer; font-weight: 600; box-shadow: 0 2px 5px rgba(59,130,246,0.3); transition: transform 0.2s;">+ Add Files</button>
-                                <input type="file" id="file-upload" multiple accept="image/png,image/jpeg,image/gif,image/webp,text/*,.json,.js,.py,.md,.html,.css,.txt,.csv,.xml,.yml,.yaml,.sh" style="display: none;">
+                                <!-- Kept in step with isTextFile() in script.js; the OS MIME table
+                                     is wrong for source files (".ts" is video/mp2t), so the
+                                     extension list does the work. -->
+                                <input type="file" id="file-upload" multiple accept="image/png,image/jpeg,image/gif,image/webp,text/*,.txt,.md,.markdown,.rst,.log,.csv,.tsv,.json,.jsonc,.json5,.xml,.yml,.yaml,.toml,.ini,.cfg,.conf,.env,.properties,.js,.mjs,.cjs,.jsx,.ts,.tsx,.vue,.svelte,.html,.htm,.css,.scss,.sass,.less,.py,.rb,.php,.pl,.lua,.r,.c,.h,.cc,.cpp,.hpp,.cxx,.cs,.java,.kt,.kts,.swift,.mm,.go,.rs,.zig,.dart,.scala,.clj,.ex,.exs,.erl,.hs,.sh,.bash,.zsh,.fish,.ps1,.bat,.cmd,.sql,.graphql,.gql,.proto,.tf,.tfvars,.diff,.patch" style="display: none;">
                             </div>
                             <div id="file-chips" style="display: flex; flex-wrap: wrap; gap: 6px;"></div>
                             <textarea id="context-input" placeholder="Paste text here or drop files into this area..." rows="3"></textarea>

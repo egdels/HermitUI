@@ -68,6 +68,8 @@ ${fn("buildFinalHistory")}
 ${fn("createThrottle")}
 ${fn("apiEndpoint")}
 ${fn("detectCloudProvider")}
+${fn("isLocalEndpoint")}
+${fn("describeRemoteEndpoint")}
 ${fn("isTextFile")}
 ${fn("isImageFile")}
 ${fn("modelSupportsVision")}
@@ -81,7 +83,8 @@ export {
     SUMMARY_PREFIX, escapeHtml, unescapeHtml, contentToText, parseChatExport,
     splitContextBlocks, exportMd,
     parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint,
-    detectCloudProvider, isTextFile, isImageFile, modelSupportsVision,
+    detectCloudProvider, isLocalEndpoint, describeRemoteEndpoint,
+    isTextFile, isImageFile, modelSupportsVision,
     modelReportsVision, extractModelId, normalizeGgufUrl, detectTemplateFromArch,
     buildWllamaPrompt,
 };
