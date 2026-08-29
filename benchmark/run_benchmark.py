@@ -230,6 +230,12 @@ def benchmark_model(page, base: str, model: dict, questions, cfg) -> dict:
     for i, q in enumerate(questions):
         print(f"   ▷ {q['id']} ({i + 1}/{len(questions)})…")
         page.click("#clearBtn")
+        # #clearBtn only asks for confirmation once something is on screen, so
+        # the first question goes straight through and the rest need a click.
+        # Without this the overlay stays up and intercepts the #sendBtn click.
+        if page.is_visible("#newChatConfirmModal.active"):
+            page.click("#newChatConfirmBtn")
+            page.wait_for_selector("#newChatConfirmModal.active", state="hidden")
         prompt = q["text"] + (" /no_think" if not q["thinking"] and model.get("nothink") else "")
         prev = page.evaluate("document.querySelectorAll('.msg-wrapper.ai .msg-content').length")
         page.fill("#userInput", prompt)
