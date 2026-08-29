@@ -1058,48 +1058,6 @@ Rules:
             document.getElementById("wllamaUrlLoadBtn").disabled = busy;
         }
 
-        // wllama 3.5.1 (latest as of 2026-07) has a token-loss bug: its
-        // getResponse() polls the worker's get_result action but breaks as soon
-        // as has_more is false — even when that poll still returned data. The
-        // worker pops only ONE queued result per poll while has_more reflects
-        // task-queue emptiness, so results still queued when generation ends are
-        // stranded and get drained by the NEXT completion's first polls. Every
-        // answer loses its final tokens and they "bleed" into the following
-        // answer. This override keeps polling until an empty poll confirms the
-        // queue is drained. Remove once fixed upstream (ngxson/wllama).
-        function patchWllamaGetResponse(Wllama) {
-            Wllama.prototype.getResponse = async function (options, isStream) {
-                let finalResult = null;
-                while (true) {
-                    // Same message the app's onData throws on Stop; the catch in
-                    // fetchAndStreamChat matches it by err.message.
-                    if (options.abortSignal?.aborted) throw new Error("AbortError");
-                    const chunk = await this.proxy.wllamaAction("get_result", { _name: "gres_req" });
-                    const jsonString = chunk.data_json;
-                    if (!jsonString || jsonString.length === 0) {
-                        if (!chunk.has_more) break; // queue confirmed empty → done
-                        continue;
-                    }
-                    if (jsonString === "null") continue;
-                    let jsonData = this.jsonDecode(jsonString);
-                    finalResult = jsonData;
-                    if (chunk.is_error) {
-                        throw new Error(jsonData.message || "Unknown inference error");
-                    }
-                    if (isStream) {
-                        if (!Array.isArray(jsonData)) jsonData = [jsonData];
-                        for (const c of jsonData) {
-                            options.onData?.(c);
-                            finalResult = c;
-                        }
-                    }
-                    // Upstream breaks here on !chunk.has_more, stranding queued
-                    // results; keep looping until the empty poll above.
-                }
-                return finalResult;
-            };
-        }
-
         // Shared load path for both entry points (local file picker and by-URL
         // download). `blobs` is what wllama's loadModel expects; `label` is only
         // used for status messages. Errors are reported in the status line and
@@ -1133,7 +1091,6 @@ Rules:
                     wllamaLog("log", `Loading wllama engine from ${engine.source}…`);
                     const module = await import(engine.js);
                     WllamaClass = module.Wllama;
-                    patchWllamaGetResponse(WllamaClass);
                 }
 
                 // Flush the previous engine's RAM/VRAM before initializing a new one.
@@ -2332,7 +2289,7 @@ Rules:
 
         // @wllama:start
         // ========== In-Browser Inference (wllama) ==========
-        const WLLAMA_CDN_BASE = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.5.1/esm";
+        const WLLAMA_CDN_BASE = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm";
         let backendMode = "api";
         let WllamaClass = null;
         let wllamaInstance = null;
@@ -2723,7 +2680,11 @@ Rules:
                     wllamaLog("log", `Generation done: ${genTokens} tokens in ${genSecs.toFixed(1)}s (${finalTps} tok/s)`);
                     onDone(0, genTokens);
                 } catch (err) {
-                    if (err.message === "AbortError") {
+                    // Two shapes reach here: the Error("AbortError") thrown by our
+                    // onData above, and wllama's own WllamaAbortError (name
+                    // "AbortError", message "Operation aborted") when the abort
+                    // lands between polls. Match either.
+                    if (err.name === "AbortError" || err.message === "AbortError") {
                         const abortSecs = (performance.now() - genStart) / 1000;
                         if (liveStatEl) liveStatEl.textContent = `${genTokens} tok · ${abortSecs > 0 ? (genTokens / abortSecs).toFixed(1) : "0.0"} tok/s (stopped)`;
                         wllamaLog("warn", `Generation aborted after ${genTokens} tokens`);
