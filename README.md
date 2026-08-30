@@ -211,8 +211,7 @@ Prefer to run the model outside the browser? The standalone build (`index.html` 
 3. **Model Name:** anything — `llama-server` serves whichever model it loaded.
 4. *Tip:* add `--reasoning-format deepseek` for a reasoning model. It returns the trace in `reasoning_content`, which HermitUI renders in the collapsible think block. **Settings → Check Reasoning Support** reads this server's `/props` and will report reasoning support exactly.
 
-<details>
-<summary><b>Reference config: a 27B on a 16 GB card, measured</b></summary>
+#### Reference config: a 27B on a 16 GB card, measured
 
 **If you have a 16 GB GPU, this is a config that fits and what each flag costs.** Qwen3.8-27B at 4 bpw, one RTX 5070 Ti, using the model's own MTP layer for speculative decoding. Nothing here is card-specific except the numbers — the same reasoning applies to any 16 GB card.
 
@@ -259,7 +258,6 @@ That leaves roughly **410 MiB spare** — it runs, but with no room for anything
 
 For scale: this is roughly **10× the ~8 t/s** the same model reaches in the [in-browser build](#qwen38-27b--verified-working-in-the-browser). Native is far faster — the browser build buys zero-install and privacy, not speed.
 
-</details>
 
 ### Cloud models (OpenRouter, OpenAI, Groq, …)
 1. **API URL:** the provider's chat completions endpoint (e.g., `https://openrouter.ai/api/v1/chat/completions`).
