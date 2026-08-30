@@ -522,6 +522,136 @@ Rules:
             switchPersona(e.target.value);
         });
 
+        // ========== Reasoning Effort ==========
+        // "high" is the default because it matches what these templates do when the
+        // variable is absent — so the control changes nothing until the user moves it.
+        let thinkingLevel = "high";
+        // Nothing is sent until the user actually picks a level. "High" is only the
+        // control's resting position: it matches what these templates do when the
+        // variable is absent, but a cloud reasoning model defaults to medium, and
+        // silently upgrading every existing user's requests to high would quietly cost
+        // them reasoning tokens they never asked for.
+        let thinkingTouched = false;
+        // What we know about the *remote* backend: "supported" | "unsupported" | "unknown".
+        // Only /props-style capability data can make this definitive; see probeReasoningSupport.
+        let apiReasoning = { state: "unknown", maxLevel: "high", source: "not checked" };
+        // Set once a strict server has rejected our reasoning params, so we stop resending them.
+        let apiReasoningRejected = false;
+        // Filled in from the loaded GGUF's embedded template (wllama builds only).
+        let wllamaReasoning = { supported: false, maxLevel: "high" };
+
+        const thinkingSelect = document.getElementById("thinkingSelect");
+        thinkingSelect.addEventListener("change", (e) => {
+            thinkingLevel = e.target.value;
+            thinkingTouched = true;
+        });
+
+        // Show the control only where it can plausibly do something: proven support for
+        // a local GGUF, and for remote endpoints anything short of a definite "no"
+        // (most servers expose no capability data at all, and hiding it there would
+        // lose the feature on every cloud reasoning model).
+        // backendMode is declared inside a wllama marker block, so it doesn't exist in
+        // the other builds — those are always API-only. Guarded with typeof so the
+        // stripped output stays valid. Safe to call once startup has run past that
+        // declaration, which is why the initial call sits at the end of the script.
+        function activeBackend() {
+            return typeof backendMode !== "undefined" ? backendMode : "api";
+        }
+
+        function updateThinkingControl() {
+            // An explicit manual chat-format override bypasses the embedded template
+            // entirely, so its reasoning variables would never be read.
+            const templateChoice = document.getElementById("settingWllamaTemplate")?.value || "auto";
+            const support = activeBackend() === "wllama"
+                ? (wllamaReasoning.supported && templateChoice === "auto" ? "supported" : "unsupported")
+                : (apiReasoningRejected ? "unsupported" : apiReasoning.state);
+            thinkingSelect.style.display = support === "unsupported" ? "none" : "";
+            thinkingSelect.title = support === "supported"
+                ? "Reasoning effort"
+                : "Reasoning effort (this endpoint doesn't advertise support — it may ignore it)";
+        }
+
+        // Current level as request params for whichever backend is active.
+        function currentReasoningParams() {
+            if (!thinkingTouched) return {};
+            if (activeBackend() === "wllama") {
+                if (!wllamaReasoning.supported) return {};
+                return buildReasoningParams(thinkingLevel, { backend: "wllama", maxLevel: wllamaReasoning.maxLevel });
+            }
+            if (apiReasoningRejected || apiReasoning.state === "unsupported") return {};
+            return buildReasoningParams(thinkingLevel, { backend: "api", maxLevel: apiReasoning.maxLevel });
+        }
+
+        // Ask the endpoint what it can do. llama.cpp's /props is the only fully reliable
+        // remote signal: a plain request probe cannot work, because permissive servers
+        // answer 200 for parameters they silently ignore (verified — llama.cpp accepts a
+        // deliberately bogus param), so "no error" proves nothing.
+        async function probeReasoningSupport() {
+            const root = apiRoot(API_URL);
+            const headers = { "Authorization": "Bearer " + API_KEY };
+            try {
+                const res = await fetch(root + "/props", { headers });
+                if (res.ok) {
+                    const p = await res.json();
+                    const caps = p.chat_template_caps;
+                    if (caps && typeof caps.supports_reasoning_effort === "boolean") {
+                        return {
+                            state: caps.supports_reasoning_effort ? "supported" : "unsupported",
+                            maxLevel: parseReasoningTemplateSupport(p.chat_template).maxLevel,
+                            source: "llama.cpp /props",
+                        };
+                    }
+                    if (typeof p.chat_template === "string") {
+                        const t = parseReasoningTemplateSupport(p.chat_template);
+                        return {
+                            state: t.supported ? "supported" : "unsupported",
+                            maxLevel: t.maxLevel,
+                            source: "server chat template",
+                        };
+                    }
+                }
+            } catch (e) { /* no /props here — try Ollama next */ }
+            try {
+                const res = await fetch(root + "/api/show", {
+                    method: "POST",
+                    headers: Object.assign({ "Content-Type": "application/json" }, headers),
+                    body: JSON.stringify({ model: MODEL_NAME }),
+                });
+                if (res.ok) {
+                    const info = await res.json();
+                    const t = parseReasoningTemplateSupport(info.template);
+                    return {
+                        state: t.supported ? "supported" : "unsupported",
+                        maxLevel: t.maxLevel,
+                        source: "Ollama /api/show",
+                    };
+                }
+            } catch (e) { /* not Ollama either */ }
+            return { state: "unknown", maxLevel: "high", source: "endpoint exposes no capability data" };
+        }
+
+        document.getElementById("reasoningProbeBtn").addEventListener("click", async (e) => {
+            const btn = e.currentTarget;
+            const statusEl = document.getElementById("reasoningProbeStatus");
+            btn.disabled = true;
+            statusEl.textContent = "Reasoning support: checking…";
+            try {
+                apiReasoning = await probeReasoningSupport();
+                apiReasoningRejected = false; // a fresh probe supersedes an earlier rejection
+                const label = {
+                    supported: `✅ supported (via ${apiReasoning.source}, max "${apiReasoning.maxLevel}")`,
+                    unsupported: `❌ not supported (via ${apiReasoning.source}) — control hidden`,
+                    unknown: `❓ unknown — ${apiReasoning.source}; the control stays available and is sent optimistically`,
+                }[apiReasoning.state];
+                statusEl.textContent = "Reasoning support: " + label;
+                updateThinkingControl();
+            } catch (err) {
+                statusEl.textContent = "Reasoning support: probe failed — " + (err.message || err);
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
         // Apply a free-form system prompt (settings edit, or one restored by an
         // import) and keep the persona dropdown honest: snap back to a preset when
         // the text matches one, otherwise show a temporary "⚡ Custom" entry.
@@ -957,9 +1087,16 @@ Rules:
             // @wllama:start
             backendMode = document.getElementById("settingBackendMode").value;
             // @wllama:end
+            const prevApiUrl = API_URL;
             API_URL = document.getElementById("settingUrl").value.trim();
             API_KEY = document.getElementById("settingApiKey").value.trim() || "dummy";
-            
+            // A different endpoint invalidates whatever we learned about the old one.
+            if (API_URL !== prevApiUrl) {
+                apiReasoning = { state: "unknown", maxLevel: "high", source: "not checked" };
+                apiReasoningRejected = false;
+                document.getElementById("reasoningProbeStatus").textContent = "Reasoning support: not checked";
+            }
+
             const modelSelect = document.getElementById("settingModelSelect");
             const modelInput = document.getElementById("settingModelInput");
             if (modelSelect.style.display !== "none" && modelSelect.value !== "custom") {
@@ -987,6 +1124,7 @@ Rules:
 
             applySystemPrompt(document.getElementById("settingSystem").value.trim());
 
+            updateThinkingControl();
             updateOverlay();
             updateMainCloudWarning();
             closeModalEl(settingsModal);
@@ -1132,6 +1270,12 @@ Rules:
                     );
                     const loadOptions = useWebGpu ? {} : { n_gpu_layers: 0 };
                     if (attemptCtx) loadOptions.n_ctx = attemptCtx;
+                    // Keep reasoning inline in the content as literal <think>…</think>.
+                    // llama.cpp's default ("auto") splits it into a separate reasoning
+                    // field that this app's onData never reads, so a model that thinks at
+                    // length streams no content at all — a hard question then renders as an
+                    // empty answer. Inline is also what parseThinkSegments already expects.
+                    loadOptions.reasoning_format = "none";
 
                     // Stream download/decode progress into the status line and debug panel.
                     loadOptions.progressCallback = ({ loaded, total }) => {
@@ -1182,6 +1326,10 @@ Rules:
                     const m = meta?.meta || meta || {};
                     wllamaHasEmbeddedTemplate = !!m["tokenizer.chat_template"];
                     wllamaDetectedTemplate = detectTemplateFromArch(m["general.architecture"]);
+                    // The embedded template is the ground truth for reasoning support: if it
+                    // never references the variables, passing them provably does nothing.
+                    wllamaReasoning = parseReasoningTemplateSupport(m["tokenizer.chat_template"]);
+                    wllamaLog("log", `Reasoning controls → ${wllamaReasoning.supported ? `supported (max "${wllamaReasoning.maxLevel}")` : "not supported by this template"}`);
                     wllamaLog("log", `Metadata → arch=${m["general.architecture"] || "?"}, name=${m["general.name"] || "?"}, embedded_template=${wllamaHasEmbeddedTemplate}, detected_format=${wllamaDetectedTemplate}`);
                     wllamaLog("debug", "Full model metadata:", m);
                 } catch (metaErr) {
@@ -1199,6 +1347,7 @@ Rules:
                 wllamaModelLabel = label;
                 updateOverlay();
                 updateMainCloudWarning();
+                updateThinkingControl();
                 if (wllamaHashLoadPending) {
                     // Banner-initiated load: drop the user straight into the chat.
                     wllamaHashLoadPending = false;
@@ -1638,6 +1787,61 @@ Rules:
             return url;
         }
 
+        // Capability endpoints (/props, /api/show) live at the server root, not under
+        // the OpenAI-compatible /v1 prefix, so strip that too.
+        function apiRoot(base) {
+            let url = (base || "").trim().replace(/\/+$/, "");
+            for (const known of ["/chat/completions", "/completions", "/models"]) {
+                if (url.endsWith(known)) { url = url.slice(0, -known.length); break; }
+            }
+            return url.replace(/\/v\d+$/, "");
+        }
+
+        // Does a Jinja chat template actually branch on the reasoning controls?
+        // Template engines silently ignore context variables the template never
+        // references, so "not mentioned" is proof the kwargs would do nothing —
+        // which is what makes this a real capability check and not a guess.
+        function parseReasoningTemplateSupport(templateText) {
+            const t = typeof templateText === "string" ? templateText : "";
+            const enableThinking = /enable_thinking/.test(t);
+            const reasoningEffort = /reasoning_effort/.test(t);
+            return {
+                supported: enableThinking || reasoningEffort,
+                enableThinking,
+                reasoningEffort,
+                // Qwen3.5/3.8 name their top level "xhigh"; OpenAI-style templates cap at "high".
+                maxLevel: /xhigh/.test(t) ? "xhigh" : "high",
+            };
+        }
+
+        // Map a UI thinking level onto request params for the target backend.
+        // level: "off" | "low" | "medium" | "high"  ("high" is the default and means
+        // "whatever this template calls its maximum", hence maxLevel).
+        // Returns {} for an unknown level so callers can always spread the result.
+        // Destructured inside the body, not in the signature: tests/extract.mjs slices
+        // functions by brace matching and would cut a `{…}` parameter list short.
+        function buildReasoningParams(level, opts) {
+            const { backend = "api", maxLevel = "high" } = opts || {};
+            if (!["off", "low", "medium", "high"].includes(level)) return {};
+            const effort = level === "high" ? maxLevel : level;
+            if (backend === "wllama") {
+                // wllama applies the GGUF's own template, so everything goes through kwargs.
+                return level === "off"
+                    ? { chat_template_kwargs: { enable_thinking: false } }
+                    : { chat_template_kwargs: { enable_thinking: true, reasoning_effort: effort } };
+            }
+            // Remote: reasoning_effort is the OpenAI-standard field and llama.cpp honours
+            // it too. There is no standard way to say "off", so that one case falls back
+            // to the template kwarg that llama.cpp/vLLM/Qwen builds understand.
+            return level === "off"
+                ? { chat_template_kwargs: { enable_thinking: false } }
+                : { reasoning_effort: effort };
+        }
+
+        // The param names buildReasoningParams can introduce — used to strip them from a
+        // payload when a strict server rejects them.
+        const REASONING_PARAM_KEYS = ["reasoning_effort", "chat_template_kwargs"];
+
         // ========== Test Connection & Fetch Models ==========
         document.getElementById("testConnectionBtn").addEventListener("click", async (e) => {
             e.preventDefault();
@@ -1976,7 +2180,10 @@ Rules:
                     ],
                     temperature: 0.3,
                     stream: true,
-                    stream_options: { include_usage: true }
+                    stream_options: { include_usage: true },
+                    // Honour the chatbox setting here too: "Off" should make the summary
+                    // fast as well, not just the chat turn.
+                    ...currentReasoningParams()
                 },
                 outerEl: responseContainer,
                 bodyEl: responseContainer.querySelector('.ai-response-body'),
@@ -2652,6 +2859,9 @@ Rules:
                             max_tokens: maxTokens,
                             temperature,
                             ...sampling,
+                            // Reasoning controls reach the GGUF's own template as kwargs;
+                            // empty unless the template actually reads them.
+                            ...currentReasoningParams(),
                             stream: true,
                             abortSignal: signal,
                             onData
@@ -2706,20 +2916,44 @@ Rules:
             const chatUrl = apiEndpoint(API_URL, "/chat/completions");
 
             try {
-                const response = await fetch(chatUrl, {
+                const postChat = (body) => fetch(chatUrl, {
                     method: "POST",
                     headers: { "Content-Type": "application/json", "Authorization": "Bearer " + API_KEY },
-                    body: JSON.stringify(payload),
+                    body: JSON.stringify(body),
                     signal: signal
                 });
+                const readDetail = async (res) => {
+                    let detail = res.statusText || "Unknown Error";
+                    try {
+                        const errBody = await res.json();
+                        detail = errBody.error?.message || detail;
+                    } catch (e) {}
+                    return detail;
+                };
+
+                let response = await postChat(payload);
+
+                // A strict server (OpenAI rejects unrecognised arguments) can 400 purely
+                // because of the reasoning params. That must not cost the user their
+                // message: drop those keys, retry once, and stop offering the control.
+                // Only permissive servers reach here silently — they answer 200 for
+                // params they ignore, which is why support can't be probed by sending one.
+                if (!response.ok && response.status === 400 && REASONING_PARAM_KEYS.some(k => k in payload)) {
+                    const detail = await readDetail(response);
+                    if (REASONING_PARAM_KEYS.some(k => detail.includes(k))) {
+                        const retryPayload = { ...payload };
+                        for (const k of REASONING_PARAM_KEYS) delete retryPayload[k];
+                        apiReasoningRejected = true;
+                        updateThinkingControl();
+                        showToast("🧠 This endpoint rejects reasoning settings — retrying without them");
+                        response = await postChat(retryPayload);
+                    } else {
+                        throw new Error(`Server Error ${response.status}: ${detail}`);
+                    }
+                }
 
                 if (!response.ok) {
-                    let detail = response.statusText || "Unknown Error";
-                    try { 
-                        const errBody = await response.json(); 
-                        detail = errBody.error?.message || detail; 
-                    } catch (e) {}
-                    throw new Error(`Server Error ${response.status}: ${detail}`);
+                    throw new Error(`Server Error ${response.status}: ${await readDetail(response)}`);
                 }
 
                 const reader = response.body.getReader();
@@ -2957,6 +3191,7 @@ Rules:
             if (PRESENCE_PENALTY !== 0) chatPayload.presence_penalty = PRESENCE_PENALTY;
             if (FREQUENCY_PENALTY !== 0) chatPayload.frequency_penalty = FREQUENCY_PENALTY;
             if (SEED != null) chatPayload.seed = SEED;
+            Object.assign(chatPayload, currentReasoningParams());
 
             await runStreamingResponse({
                 payload: chatPayload,
@@ -3208,3 +3443,10 @@ Rules:
             }
         }
         applyHashConfig();
+
+        // Reasoning control: an explicit chat-format override changes whether the
+        // embedded template (and therefore its reasoning variables) is used at all.
+        document.getElementById("settingWllamaTemplate")?.addEventListener("change", updateThinkingControl);
+        // Runs last on purpose — activeBackend() reads backendMode, which is declared
+        // further up but only initialised once execution reaches it.
+        updateThinkingControl();

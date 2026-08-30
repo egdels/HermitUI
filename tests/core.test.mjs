@@ -12,7 +12,7 @@ const {
     detectCloudProvider, isLocalEndpoint, describeRemoteEndpoint,
     isTextFile, isImageFile, modelSupportsVision,
     modelReportsVision, extractModelId, normalizeGgufUrl, detectTemplateFromArch,
-    buildWllamaPrompt,
+    buildWllamaPrompt, apiRoot, parseReasoningTemplateSupport, buildReasoningParams,
 } = H;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -298,6 +298,79 @@ section("10. render throttle");
     t2.cancel();
     await sleep(140);
     check("cancel() drops the pending trailing call", cancelled.join() === "a", cancelled.join());
+}
+
+// The reasoning control must only appear where it can actually do something. Template
+// engines ignore variables a template never references, so scanning the template is a
+// real capability check rather than a guess.
+section("11. reasoning capability detection");
+{
+    const qwen38 = `{%- if enable_thinking is undefined or enable_thinking is true %}
+        {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
+        {%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}`;
+    const plain = `{% for message in messages %}{{ '<|user|>' + message['content'] }}{% endfor %}`;
+    const openaiish = `{%- set effort = reasoning_effort|default('high') %}`;
+
+    const q = parseReasoningTemplateSupport(qwen38);
+    check("Qwen3.8 template is detected as supporting reasoning", q.supported === true, q.supported);
+    check("its maximum level is xhigh, not high", q.maxLevel === "xhigh", q.maxLevel);
+    check("enable_thinking is seen", q.enableThinking === true, q.enableThinking);
+
+    const p = parseReasoningTemplateSupport(plain);
+    check("a template with no reasoning vars is unsupported", p.supported === false, p.supported);
+
+    const o = parseReasoningTemplateSupport(openaiish);
+    check("reasoning_effort alone counts as supported", o.supported === true, o.supported);
+    check("without xhigh the max level is high", o.maxLevel === "high", o.maxLevel);
+
+    // Missing/garbage metadata must not throw — it just means "no support".
+    check("undefined template is unsupported", parseReasoningTemplateSupport(undefined).supported === false);
+    check("null template is unsupported", parseReasoningTemplateSupport(null).supported === false);
+}
+
+// wllama drives the GGUF's own template, so everything travels as template kwargs;
+// remote endpoints take the OpenAI-standard reasoning_effort field instead.
+section("12. reasoning request params");
+{
+    const w = l => buildReasoningParams(l, { backend: "wllama", maxLevel: "xhigh" });
+    check("wllama high maps onto the template's own maximum",
+        w("high").chat_template_kwargs.reasoning_effort === "xhigh",
+        JSON.stringify(w("high")));
+    check("wllama medium passes through unchanged",
+        w("medium").chat_template_kwargs.reasoning_effort === "medium",
+        JSON.stringify(w("medium")));
+    check("wllama off disables thinking and sends no effort",
+        w("off").chat_template_kwargs.enable_thinking === false
+            && !("reasoning_effort" in w("off").chat_template_kwargs),
+        JSON.stringify(w("off")));
+
+    const a = l => buildReasoningParams(l, { backend: "api", maxLevel: "high" });
+    check("api low sends the OpenAI-standard field", a("low").reasoning_effort === "low", JSON.stringify(a("low")));
+    check("api never sends chat_template_kwargs for a normal level",
+        !("chat_template_kwargs" in a("high")), JSON.stringify(a("high")));
+    check("api off falls back to the template kwarg, since OpenAI has no 'off'",
+        a("off").chat_template_kwargs.enable_thinking === false, JSON.stringify(a("off")));
+    check("an api endpoint whose template maxes at xhigh gets xhigh",
+        buildReasoningParams("high", { backend: "api", maxLevel: "xhigh" }).reasoning_effort === "xhigh");
+
+    // Callers spread the result unconditionally, so an unknown level must be inert.
+    check("an unknown level yields no params at all",
+        Object.keys(buildReasoningParams("bogus", { backend: "api" })).length === 0);
+    check("a missing level yields no params at all",
+        Object.keys(buildReasoningParams(undefined, { backend: "wllama" })).length === 0);
+    check("buildReasoningParams works with no options object",
+        buildReasoningParams("low").reasoning_effort === "low");
+}
+
+// /props and /api/show sit at the server root, not under the OpenAI /v1 prefix.
+section("13. capability-endpoint base URL");
+{
+    check("strips /v1", apiRoot("http://localhost:8080/v1") === "http://localhost:8080", apiRoot("http://localhost:8080/v1"));
+    check("strips a pasted full endpoint", apiRoot("http://localhost:8080/v1/chat/completions") === "http://localhost:8080", apiRoot("http://localhost:8080/v1/chat/completions"));
+    check("strips /models", apiRoot("http://localhost:8080/v1/models") === "http://localhost:8080", apiRoot("http://localhost:8080/v1/models"));
+    check("tolerates a trailing slash", apiRoot("http://localhost:8080/v1/") === "http://localhost:8080", apiRoot("http://localhost:8080/v1/"));
+    check("leaves a bare origin alone", apiRoot("http://localhost:11434") === "http://localhost:11434", apiRoot("http://localhost:11434"));
+    check("keeps a non-version path prefix", apiRoot("https://host/openai/v1") === "https://host/openai", apiRoot("https://host/openai/v1"));
 }
 
 report();

@@ -213,6 +213,10 @@
             <select id="settingModelSelect" style="display: none; width: 100%; padding: 12px 16px; border-radius: 12px; border: 1px solid #d1d5db; font-size: 0.95rem; font-family: 'Inter', system-ui, sans-serif; color: var(--text-main); margin-bottom: 20px; outline: none; background: #fff; cursor: pointer;">
             </select>
             <input type="text" id="settingModelInput" value="local-model">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 20px;">
+                <span id="reasoningProbeStatus" style="font-size: 0.75rem; color: #6b7280;">Reasoning support: not checked</span>
+                <button type="button" class="action-btn" id="reasoningProbeBtn" style="color: var(--primary); font-weight: 600; font-size: 0.75rem; padding: 2px 6px; flex-shrink: 0;">🧠 Check Reasoning Support</button>
+            </div>
             <!-- @wllama:start -->
             </div>
             <!-- @wllama:end -->
@@ -267,6 +271,14 @@
                         <option value="general">💬 General</option>
                         <option value="writing">✍️ Writing</option>
                         <option value="tutor">🎓 Tutor</option>
+                    </select>
+                    <!-- Reasoning-effort control. Hidden unless the active backend is known
+                         (or believed) to honour it — see updateThinkingControl(). -->
+                    <select class="persona-select" id="thinkingSelect" title="Reasoning effort" style="margin-bottom: 8px; flex-shrink: 0; box-shadow: 0 4px 15px rgba(0,0,0,0.05); padding: 10px 32px 10px 16px; border-radius: 16px; display: none;">
+                        <option value="off">🧠 Think: Off</option>
+                        <option value="low">🧠 Think: Low</option>
+                        <option value="medium">🧠 Think: Medium</option>
+                        <option value="high" selected>🧠 Think: High</option>
                     </select>
                     <form id="chatForm" style="flex-grow: 1; max-width: 850px; display: flex; flex-direction: column; gap: 8px; position: relative;">
                         <div id="context-pane" style="display: none;">

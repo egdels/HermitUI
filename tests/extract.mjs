@@ -67,6 +67,9 @@ ${fn("parseThinkSegments")}
 ${fn("buildFinalHistory")}
 ${fn("createThrottle")}
 ${fn("apiEndpoint")}
+${fn("apiRoot")}
+${fn("parseReasoningTemplateSupport")}
+${fn("buildReasoningParams")}
 ${fn("detectCloudProvider")}
 ${fn("isLocalEndpoint")}
 ${fn("describeRemoteEndpoint")}
@@ -82,7 +85,8 @@ function exportMd(messages) { ${exportBody()} return md; }
 export {
     SUMMARY_PREFIX, escapeHtml, unescapeHtml, contentToText, parseChatExport,
     splitContextBlocks, exportMd,
-    parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint,
+    parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint, apiRoot,
+    parseReasoningTemplateSupport, buildReasoningParams,
     detectCloudProvider, isLocalEndpoint, describeRemoteEndpoint,
     isTextFile, isImageFile, modelSupportsVision,
     modelReportsVision, extractModelId, normalizeGgufUrl, detectTemplateFromArch,
