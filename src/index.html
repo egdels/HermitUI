@@ -265,44 +265,49 @@
            
             <div class="input-container">
                 <button id="jumpBottomBtn" class="jump-bottom-btn">⬇️ Jump to Bottom</button>
-                <div style="display: flex; gap: 12px; align-items: flex-end; width: 100%; max-width: 1000px; justify-content: center;">
-                    <select class="persona-select" id="personaSelect" title="Switch Persona" style="margin-bottom: 8px; flex-shrink: 0; box-shadow: 0 4px 15px rgba(0,0,0,0.05); padding: 10px 32px 10px 16px; border-radius: 16px;">
-                        <option value="technical">🔧 Technical</option>
-                        <option value="general">💬 General</option>
-                        <option value="writing">✍️ Writing</option>
-                        <option value="tutor">🎓 Tutor</option>
-                    </select>
-                    <!-- Reasoning-effort control. Hidden unless the active backend is known
-                         (or believed) to honour it — see updateThinkingControl(). -->
-                    <select class="persona-select" id="thinkingSelect" title="Reasoning effort" style="margin-bottom: 8px; flex-shrink: 0; box-shadow: 0 4px 15px rgba(0,0,0,0.05); padding: 10px 32px 10px 16px; border-radius: 16px; display: none;">
-                        <option value="off">🧠 Think: Off</option>
-                        <option value="low">🧠 Think: Low</option>
-                        <option value="medium">🧠 Think: Medium</option>
-                        <option value="high" selected>🧠 Think: High</option>
-                    </select>
-                    <form id="chatForm" style="flex-grow: 1; max-width: 850px; display: flex; flex-direction: column; gap: 8px; position: relative;">
-                        <div id="context-pane" style="display: none;">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <span style="font-size: 0.85rem; font-weight: 600; color: #6b7280; display: flex; align-items: center; gap: 6px;">📎 Attach Data or Files</span>
-                                <button type="button" id="add-file-btn" style="background: var(--primary); color: white; border: none; padding: 6px 12px; border-radius: 8px; font-size: 0.8rem; cursor: pointer; font-weight: 600; box-shadow: 0 2px 5px rgba(59,130,246,0.3); transition: transform 0.2s;">+ Add Files</button>
-                                <!-- Kept in step with isTextFile() in script.js; the OS MIME table
-                                     is wrong for source files (".ts" is video/mp2t), so the
-                                     extension list does the work. -->
-                                <input type="file" id="file-upload" multiple accept="image/png,image/jpeg,image/gif,image/webp,text/*,.txt,.md,.markdown,.rst,.log,.csv,.tsv,.json,.jsonc,.json5,.xml,.yml,.yaml,.toml,.ini,.cfg,.conf,.env,.properties,.js,.mjs,.cjs,.jsx,.ts,.tsx,.vue,.svelte,.html,.htm,.css,.scss,.sass,.less,.py,.rb,.php,.pl,.lua,.r,.c,.h,.cc,.cpp,.hpp,.cxx,.cs,.java,.kt,.kts,.swift,.mm,.go,.rs,.zig,.dart,.scala,.clj,.ex,.exs,.erl,.hs,.sh,.bash,.zsh,.fish,.ps1,.bat,.cmd,.sql,.graphql,.gql,.proto,.tf,.tfvars,.diff,.patch" style="display: none;">
-                            </div>
-                            <div id="file-chips" style="display: flex; flex-wrap: wrap; gap: 6px;"></div>
-                            <textarea id="context-input" placeholder="Paste text here or drop files into this area..." rows="3"></textarea>
+                <form id="chatForm">
+                    <div id="context-pane" style="display: none;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-size: 0.85rem; font-weight: 600; color: #6b7280; display: flex; align-items: center; gap: 6px;">📎 Attach Data or Files</span>
+                            <button type="button" id="add-file-btn" style="background: var(--primary); color: white; border: none; padding: 6px 12px; border-radius: 8px; font-size: 0.8rem; cursor: pointer; font-weight: 600; box-shadow: 0 2px 5px rgba(59,130,246,0.3); transition: transform 0.2s;">+ Add Files</button>
+                            <!-- Kept in step with isTextFile() in script.js; the OS MIME table
+                                 is wrong for source files (".ts" is video/mp2t), so the
+                                 extension list does the work. -->
+                            <input type="file" id="file-upload" multiple accept="image/png,image/jpeg,image/gif,image/webp,text/*,.txt,.md,.markdown,.rst,.log,.csv,.tsv,.json,.jsonc,.json5,.xml,.yml,.yaml,.toml,.ini,.cfg,.conf,.env,.properties,.js,.mjs,.cjs,.jsx,.ts,.tsx,.vue,.svelte,.html,.htm,.css,.scss,.sass,.less,.py,.rb,.php,.pl,.lua,.r,.c,.h,.cc,.cpp,.hpp,.cxx,.cs,.java,.kt,.kts,.swift,.mm,.go,.rs,.zig,.dart,.scala,.clj,.ex,.exs,.erl,.hs,.sh,.bash,.zsh,.fish,.ps1,.bat,.cmd,.sql,.graphql,.gql,.proto,.tf,.tfvars,.diff,.patch" style="display: none;">
                         </div>
-                        <div class="input-shell">
-                            <textarea id="userInput" placeholder="Ask me anything... (Shift+Enter for new line)" rows="1" autocomplete="off" autofocus></textarea>
-                            <div class="send-btn-container" style="display: flex; align-items: center; gap: 8px;">
+                        <div id="file-chips" style="display: flex; flex-wrap: wrap; gap: 6px;"></div>
+                        <textarea id="context-input" placeholder="Paste text here or drop files into this area..." rows="3"></textarea>
+                    </div>
+                    <div class="input-shell">
+                        <textarea id="userInput" placeholder="Ask me anything... (Shift+Enter for new line)" rows="1" autocomplete="off" autofocus></textarea>
+                        <!-- Controls live inside the shell so the textarea keeps the full width,
+                             and wrap onto a second row on narrow screens instead of overflowing. -->
+                        <div class="composer-toolbar">
+                            <select class="persona-select" id="personaSelect" title="Switch Persona">
+                                <option value="technical">🔧 Technical</option>
+                                <option value="general">💬 General</option>
+                                <option value="writing">✍️ Writing</option>
+                                <option value="tutor">🎓 Tutor</option>
+                            </select>
+                            <!-- Reasoning-effort control. Hidden unless the active backend is known
+                                 (or believed) to honour it — see updateThinkingControl().
+                                 type="button" on every segment is load-bearing: they sit inside
+                                 #chatForm, so a default-type button would submit the message. -->
+                            <div class="think-seg" id="thinkingControl" role="radiogroup" aria-label="Reasoning effort" title="Reasoning effort" data-level="high" style="display: none;">
+                                <span class="think-seg-icon" aria-hidden="true">🧠</span>
+                                <button type="button" role="radio" data-level="off" aria-checked="false" tabindex="-1">Off</button>
+                                <button type="button" role="radio" data-level="low" aria-checked="false" tabindex="-1">Low</button>
+                                <button type="button" role="radio" data-level="medium" aria-checked="false" tabindex="-1">Med</button>
+                                <button type="button" role="radio" data-level="high" aria-checked="true" tabindex="0">High</button>
+                            </div>
+                            <div class="composer-actions">
                                 <button type="button" id="attach-context-btn" title="Attach context/data">📎</button>
                                 <button type="submit" class="primary-btn" id="sendBtn" title="Send message">↑</button>
                                 <button type="button" class="primary-btn" id="stopBtn" title="Stop generation">■</button>
                             </div>
                         </div>
-                    </form>
-                </div>
+                    </div>
+                </form>
                 
                 <div class="stats-container">
                     <div class="inline-stats" id="inlineStats">

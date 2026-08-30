@@ -454,24 +454,16 @@
 
         #chatForm {
             display: flex;
+            flex-direction: column;
+            gap: 8px;
             width: 100%;
             max-width: 850px;
-            background: #ffffff;
-            border-radius: 24px;
-            padding: 8px 16px;
-            border: 1px solid #d1d5db;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+            margin-inline: auto;
             position: relative;
-            align-items: flex-end;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        
-        #chatForm:focus-within {
-            border-color: var(--primary);
-            box-shadow: 0 4px 20px rgba(59, 130, 246, 0.15);
         }
 
-        #chatForm.is-generating {
+        /* is-generating is still toggled on the form by JS; the glow belongs to the card. */
+        #chatForm.is-generating .input-shell {
             border-color: rgba(59, 130, 246, 0.6);
             box-shadow: 0 0 15px rgba(59, 130, 246, 0.4);
             animation: formGlow 2s ease-in-out infinite;
@@ -481,20 +473,29 @@
             50% { box-shadow: 0 0 25px rgba(59, 130, 246, 0.7); }
         }
 
-        /* The rounded shell around the textarea + send/stop buttons. */
+        /* The card: textarea on top, .composer-toolbar along its bottom edge. */
         .input-shell {
             position: relative;
             display: flex;
+            flex-direction: column;
             width: 100%;
+            padding: 6px;
             background: #fff;
             border-radius: 24px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.05);
             border: 1px solid var(--border-color);
+            transition: border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                        box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .input-shell:focus-within {
+            border-color: var(--primary);
+            box-shadow: 0 4px 20px rgba(59, 130, 246, 0.15);
         }
 
         #userInput {
             flex-grow: 1;
-            padding: 12px 84px 12px 16px; /* space for buttons */
+            padding: 10px 12px 4px;
             border: none;
             background: transparent;
             color: var(--text-main);
@@ -534,11 +535,83 @@
             transform: none; 
         }
 
-        .send-btn-container {
-            position: absolute;
-            right: 14px;
-            bottom: 7px;
+        /* Control row inside the card. flex-wrap is what keeps a narrow viewport from
+           overflowing: the actions drop to a second row and margin-left:auto keeps
+           send pinned right — no media query needed. */
+        .composer-toolbar {
             display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 4px 6px 2px;
+            border-top: 1px solid var(--border-color);
+            margin: 2px 4px 0;
+        }
+
+        .composer-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+        }
+
+        /* Ghost variant: a bordered pill in here would read as a card inside a card. */
+        .composer-toolbar .persona-select {
+            background-color: transparent;
+            border-color: transparent;
+            box-shadow: none;
+            font-size: 0.8rem;
+            padding: 5px 26px 5px 10px;
+            border-radius: 10px;
+            background-position: right 8px center;
+        }
+        .composer-toolbar .persona-select:hover,
+        .composer-toolbar .persona-select:focus {
+            background-color: rgba(59,130,246,0.06);
+            border-color: var(--primary);
+        }
+
+        /* Reasoning effort, as a segmented radiogroup. */
+        .think-seg {
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            padding: 3px;
+            border-radius: 12px;
+            background: rgba(0,0,0,0.035);
+        }
+        .think-seg-icon {
+            font-size: 0.85rem;
+            padding: 0 4px 0 5px;
+            transition: opacity 0.15s;
+        }
+        /* "Off" is a real state, so say so without a label. */
+        .think-seg[data-level="off"] .think-seg-icon {
+            opacity: 0.45;
+        }
+        .think-seg button {
+            border: none;
+            background: transparent;
+            font-family: 'Inter', system-ui, sans-serif;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #6b7280;
+            padding: 3px 9px;
+            border-radius: 9px;
+            cursor: pointer;
+            outline: none;
+            transition: all 0.15s;
+        }
+        .think-seg button:hover:not([aria-checked="true"]) {
+            color: var(--primary);
+        }
+        .think-seg button[aria-checked="true"] {
+            background: var(--primary);
+            color: #fff;
+            box-shadow: 0 1px 3px rgba(59,130,246,0.35);
+        }
+        .think-seg button:focus-visible {
+            box-shadow: 0 0 0 2px rgba(59,130,246,0.45);
         }
         
         #sendBtn, #stopBtn {
@@ -1090,9 +1163,24 @@
         :root[data-theme="dark"] .thinking-active {
             background: rgba(15, 23, 42, 0.8);
         }
-        :root[data-theme="dark"] #chatForm {
-            background: var(--surface);
-            border-color: var(--border-strong);
+        :root[data-theme="dark"] .composer-toolbar {
+            border-top-color: var(--border-strong);
+        }
+        :root[data-theme="dark"] .composer-toolbar .persona-select {
+            background-color: transparent;
+            border-color: transparent;
+        }
+        :root[data-theme="dark"] .composer-toolbar .persona-select:hover,
+        :root[data-theme="dark"] .composer-toolbar .persona-select:focus {
+            background-color: rgba(59,130,246,0.12);
+            border-color: var(--primary);
+        }
+        :root[data-theme="dark"] .think-seg {
+            background: rgba(255,255,255,0.06);
+        }
+        /* :not() keeps this off the checked segment, whose white-on-primary must survive. */
+        :root[data-theme="dark"] .think-seg button:not([aria-checked="true"]) {
+            color: var(--text-muted);
         }
         :root[data-theme="dark"] #userInput {
             color: var(--text-main);

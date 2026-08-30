@@ -540,11 +540,42 @@ Rules:
         // Filled in from the loaded GGUF's embedded template (wllama builds only).
         let wllamaReasoning = { supported: false, maxLevel: "high", levels: ["low", "medium", "high"] };
 
-        const thinkingSelect = document.getElementById("thinkingSelect");
-        thinkingSelect.addEventListener("change", (e) => {
-            thinkingLevel = e.target.value;
-            thinkingTouched = true;
+        const thinkingControl = document.getElementById("thinkingControl");
+        const thinkingRadios = [...thinkingControl.querySelectorAll("[role=radio]")];
+
+        // Roving tabindex + aria-checked, so the segmented control keeps the radiogroup
+        // keyboard contract the native <select> used to give us for free.
+        function setThinkingLevel(level, fromUser) {
+            thinkingLevel = level;
+            if (fromUser) thinkingTouched = true;
+            thinkingControl.dataset.level = level;   // dims the brain icon when off
+            thinkingRadios.forEach((r) => {
+                const on = r.dataset.level === level;
+                r.setAttribute("aria-checked", on ? "true" : "false");
+                r.tabIndex = on ? 0 : -1;
+            });
+        }
+
+        thinkingControl.addEventListener("click", (e) => {
+            const btn = e.target.closest("[role=radio]");
+            if (btn) setThinkingLevel(btn.dataset.level, true);
         });
+
+        thinkingControl.addEventListener("keydown", (e) => {
+            const dir = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
+            let i = thinkingRadios.findIndex((r) => r.dataset.level === thinkingLevel);
+            if (dir) i += dir;
+            else if (e.key === "Home") i = 0;
+            else if (e.key === "End") i = thinkingRadios.length - 1;
+            else return;
+            e.preventDefault();
+            i = Math.max(0, Math.min(thinkingRadios.length - 1, i));
+            setThinkingLevel(thinkingRadios[i].dataset.level, true);
+            thinkingRadios[i].focus();
+        });
+
+        // Markup and state can't drift apart if the markup is written from the state once.
+        setThinkingLevel(thinkingLevel, false);
 
         // Show the control only where it can plausibly do something: proven support for
         // a local GGUF, and for remote endpoints anything short of a definite "no"
@@ -565,8 +596,8 @@ Rules:
             const support = activeBackend() === "wllama"
                 ? (wllamaReasoning.supported && templateChoice === "auto" ? "supported" : "unsupported")
                 : (apiReasoningRejected ? "unsupported" : apiReasoning.state);
-            thinkingSelect.style.display = support === "unsupported" ? "none" : "";
-            thinkingSelect.title = support === "supported"
+            thinkingControl.style.display = support === "unsupported" ? "none" : "";
+            thinkingControl.title = support === "supported"
                 ? "Reasoning effort"
                 : "Reasoning effort (this endpoint doesn't advertise support — it may ignore it)";
         }
