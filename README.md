@@ -119,10 +119,34 @@ CPU-only (WebGPU off, same machine): Qwen3-0.6B ≈ 16 t/s, Qwen3-1.7B ≈ 10 t/
 
 *   **Qwen3 is the sweet spot in a browser.** Even 8B stays interactive on WebGPU, and TTFT is ~1 s across the whole family.
 *   **Gemma-4 decodes fine but prompt-processes slowly under wllama** — 9–15 s before the first token drags the end-to-end figure into single digits even though tokens then arrive at 30–40 t/s. All its answers were correct: an engine-side prompt-eval gap, not a model-quality one.
-*   **12.1 GB runs, and runs well.** gpt-oss-20b out-decodes the 7.1 GB Gemma-4-12B on a 16 GB card — a sparse MoE activating only ~3.6B params per token beats a dense model despite being 70% larger on disk. Architecture predicts throughput, not file size. WASM Memory64 (Chrome/Edge) is required: without it, anything above ~4 GB fails outright.
+*   **12.1 GB runs, and runs well — and 13.0 GB does too.** [Qwen3.8-27B at 4 bpw](#qwen38-27b--verified-working-in-the-browser) loads and holds ~8 t/s, so the practical ceiling is your VRAM rather than any engine limit. gpt-oss-20b out-decodes the 7.1 GB Gemma-4-12B on a 16 GB card — a sparse MoE activating only ~3.6B params per token beats a dense model despite being 70% larger on disk. Architecture predicts throughput, not file size. WASM Memory64 (Chrome/Edge) is required: without it, anything above ~4 GB fails outright.
 *   **The GPU matters more than the model.** 0.6B → 8B costs ~30% of decode throughput; dropping to CPU costs ~80%. Free VRAM matters most of all — a contended GPU understated these same runs by 23×, so if your numbers look nothing like these, check what else is on your card first.
 
 **[Reproduce it yourself](benchmark/README.md)** — one `pip install`, no Node. Each run writes `review.md` with the timings *and every answer in full*, so quality is reviewable and not just asserted, plus a machine-readable `run.json`.
+
+### Qwen3.8-27B — verified working in the browser
+
+**Qwen3.8-27B at 4 bpw runs in the web build.** At 13.0 GB it is the largest model verified here, ahead of gpt-oss-20b.
+
+| | |
+|---|---|
+| Model | [`byteshape/Qwen3.8-27B-GGUF`](https://huggingface.co/byteshape/Qwen3.8-27B-GGUF) → `Qwen3.8-27B-IQ4_XS-4.00bpw.gguf` |
+| Size / quant | 13.0 GB, `IQ4_XS` (4.00 bpw) |
+| Architecture | `qwen35` — hybrid attention + SSM, 65 layers, 248k vocab |
+| Load time | **18–23 s** from a local file (engine init + weights) |
+| VRAM | **14.2–14.9 GB** of a 16 GB card, at `n_ctx` 8192 |
+| Speed (app readout) | **≈8 tok/s** — 7.7–8.5 across seven replies of 550–920 tokens |
+
+The speed figure is exactly what the app's own live tokens/s readout shows, i.e. **end-to-end with prompt processing included** — the same column as `end-to-end t/s` in the table above, not a decode-only number. Short replies read lower (≈4–6 t/s at 50–170 tokens, and ≈2.5 t/s on the very first reply after a load) purely because a fixed TTFT dominates a small denominator. Judge it on the longer generations.
+
+Two caveats worth stating plainly:
+
+*   **Verified via the file picker, not `#gguf=`.** A 13 GB one-click link was not tested, and at this size the [download-once-and-re-pick](#download-once-reuse-offline) flow is the sensible route anyway. Grab the `.gguf` from the repo above, then load it with the file picker.
+*   **Chrome/Edge only, and it needs the VRAM.** WASM Memory64 is required (as for every rung above ~4 GB), and 13 GB of weights leaves little headroom on a 16 GB card — keep `n_ctx` modest (8192 was used here; this model's KV runs ~64 KB per token).
+
+It is a reasoning model that **thinks at `xhigh` by default**, which is slow enough to matter on a 27B: use the **🧠 Think** control in the chatbox to drop to `low` or **Off** for routine questions. Measured on three trivial prompts, `Off` finished in 24.9 s with zero reasoning versus 57.7 s and ~935 characters of reasoning at the default — see [Flexible thinking control](#-features).
+
+This rung was verified by hand rather than through the [benchmark harness](benchmark/), so it has no `avg TTFT` / `decode t/s` entry in the table above.
 
 ### Browser support & model size limits
 
@@ -199,6 +223,7 @@ If HermitUI fails to connect to your local AI server (e.g., a "Network Error"), 
 *   **📦 Zero-dependency setup:** all external libraries (Marked.js, DOMPurify, Highlight.js, KaTeX, Mermaid) and the Inter font are bundled directly into the file. No installation, no build step. (A CDN-linked developer version lives in `dist/hermit-ui-cdn.html`.)
 *   **🔒 Privacy first & ephemeral:** no `localStorage`, `IndexedDB`, or cookies — nothing survives the tab.
 *   **🧠 Thinking-model support:** built-in parser formats `<think>`, `<thought>`, and `<reasoning>` tags as they stream from reasoning models.
+*   **🎚️ Flexible thinking control:** a **🧠 Think** selector beside the persona picker sets reasoning depth — **Off / Low / Medium / High** — for models that support it. Off genuinely stops the reasoning trace rather than shortening it, which is the difference between a 25 s and a 58 s answer on a 27B. It only appears where it can actually do something: for a local GGUF the model's own chat template is scanned for the reasoning variables, and for a remote endpoint **Settings → Check Reasoning Support** reads llama.cpp's `/props` capability flags (or Ollama's template). Levels are validated against the set the template accepts, so a value it would reject is never sent.
 *   **⚡ Real-time streaming** with **📊 live performance stats** — prompt tokens, completion tokens, tokens/second, and total duration.
 *   **🖼️ Image & vision support:** upload, drag-and-drop, or paste (Ctrl+V) images for vision-capable models, sent as `image_url` content per the OpenAI schema with automatic vision-model detection.
 *   **📝 Rich rendering:** Markdown with per-block copy buttons, syntax highlighting, **🧮 LaTeX math** (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) rendered via KaTeX to native MathML — no webfonts, works mid-stream and offline — and **📈 Mermaid diagrams** from ```` ```mermaid ```` fences.
