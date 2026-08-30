@@ -326,32 +326,56 @@ section("11. reasoning capability detection");
     // Missing/garbage metadata must not throw — it just means "no support".
     check("undefined template is unsupported", parseReasoningTemplateSupport(undefined).supported === false);
     check("null template is unsupported", parseReasoningTemplateSupport(null).supported === false);
+
+    // The accepted set is read out of the template's own validation clause, because
+    // sending a value outside it makes the template raise.
+    check("Qwen3.8's accepted level set is parsed from its validation clause",
+        JSON.stringify(q.levels) === JSON.stringify(["xhigh", "medium", "low"]), JSON.stringify(q.levels));
+    check("'high' is correctly NOT in Qwen3.8's accepted set", !q.levels.includes("high"), JSON.stringify(q.levels));
+    check("a template without a validation clause falls back to the OpenAI trio",
+        JSON.stringify(o.levels) === JSON.stringify(["low", "medium", "high"]), JSON.stringify(o.levels));
 }
 
 // wllama drives the GGUF's own template, so everything travels as template kwargs;
 // remote endpoints take the OpenAI-standard reasoning_effort field instead.
+// Crucially, a level the template does not list is dropped rather than sent: Qwen3.5/3.8
+// templates raise on an unlisted value, and the OpenAI-standard "high" is not in their set.
 section("12. reasoning request params");
 {
-    const w = l => buildReasoningParams(l, { backend: "wllama", maxLevel: "xhigh" });
+    const QWEN = ["low", "medium", "xhigh"];   // as parsed from a Qwen3.8 template
+    const OPENAI = ["low", "medium", "high"];
+
+    const w = l => buildReasoningParams(l, { backend: "wllama", levels: QWEN });
     check("wllama high maps onto the template's own maximum",
-        w("high").chat_template_kwargs.reasoning_effort === "xhigh",
-        JSON.stringify(w("high")));
+        w("high").chat_template_kwargs.reasoning_effort === "xhigh", JSON.stringify(w("high")));
     check("wllama medium passes through unchanged",
-        w("medium").chat_template_kwargs.reasoning_effort === "medium",
-        JSON.stringify(w("medium")));
+        w("medium").chat_template_kwargs.reasoning_effort === "medium", JSON.stringify(w("medium")));
     check("wllama off disables thinking and sends no effort",
         w("off").chat_template_kwargs.enable_thinking === false
-            && !("reasoning_effort" in w("off").chat_template_kwargs),
-        JSON.stringify(w("off")));
+            && !("reasoning_effort" in w("off").chat_template_kwargs), JSON.stringify(w("off")));
 
-    const a = l => buildReasoningParams(l, { backend: "api", maxLevel: "high" });
+    const a = l => buildReasoningParams(l, { backend: "api", levels: OPENAI });
     check("api low sends the OpenAI-standard field", a("low").reasoning_effort === "low", JSON.stringify(a("low")));
+    check("api high stays 'high' where that is the accepted maximum",
+        a("high").reasoning_effort === "high", JSON.stringify(a("high")));
     check("api never sends chat_template_kwargs for a normal level",
         !("chat_template_kwargs" in a("high")), JSON.stringify(a("high")));
     check("api off falls back to the template kwarg, since OpenAI has no 'off'",
         a("off").chat_template_kwargs.enable_thinking === false, JSON.stringify(a("off")));
-    check("an api endpoint whose template maxes at xhigh gets xhigh",
-        buildReasoningParams("high", { backend: "api", maxLevel: "xhigh" }).reasoning_effort === "xhigh");
+
+    // The bug this guards: sending "high" to a Qwen3.5/3.8 template makes it raise.
+    const qapi = l => buildReasoningParams(l, { backend: "api", levels: QWEN });
+    check("api high becomes xhigh for a Qwen-style template, never 'high'",
+        qapi("high").reasoning_effort === "xhigh", JSON.stringify(qapi("high")));
+
+    // A level outside the accepted set is omitted, not passed through (high -> null).
+    const partial = l => buildReasoningParams(l, { backend: "wllama", levels: ["low", "xhigh"] });
+    check("an unlisted level is dropped rather than sent",
+        !("reasoning_effort" in partial("medium").chat_template_kwargs), JSON.stringify(partial("medium")));
+    check("dropping the effort still enables thinking",
+        partial("medium").chat_template_kwargs.enable_thinking === true, JSON.stringify(partial("medium")));
+    check("an unlisted level on the api path sends nothing at all",
+        Object.keys(buildReasoningParams("medium", { backend: "api", levels: ["low", "xhigh"] })).length === 0);
 
     // Callers spread the result unconditionally, so an unknown level must be inert.
     check("an unknown level yields no params at all",

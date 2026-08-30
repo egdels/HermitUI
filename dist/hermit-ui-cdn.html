@@ -1943,11 +1943,11 @@ Rules:
         let thinkingTouched = false;
         // What we know about the *remote* backend: "supported" | "unsupported" | "unknown".
         // Only /props-style capability data can make this definitive; see probeReasoningSupport.
-        let apiReasoning = { state: "unknown", maxLevel: "high", source: "not checked" };
+        let apiReasoning = { state: "unknown", maxLevel: "high", levels: ["low", "medium", "high"], source: "not checked" };
         // Set once a strict server has rejected our reasoning params, so we stop resending them.
         let apiReasoningRejected = false;
         // Filled in from the loaded GGUF's embedded template (wllama builds only).
-        let wllamaReasoning = { supported: false, maxLevel: "high" };
+        let wllamaReasoning = { supported: false, maxLevel: "high", levels: ["low", "medium", "high"] };
 
         const thinkingSelect = document.getElementById("thinkingSelect");
         thinkingSelect.addEventListener("change", (e) => {
@@ -1985,10 +1985,10 @@ Rules:
             if (!thinkingTouched) return {};
             if (activeBackend() === "wllama") {
                 if (!wllamaReasoning.supported) return {};
-                return buildReasoningParams(thinkingLevel, { backend: "wllama", maxLevel: wllamaReasoning.maxLevel });
+                return buildReasoningParams(thinkingLevel, { backend: "wllama", levels: wllamaReasoning.levels });
             }
             if (apiReasoningRejected || apiReasoning.state === "unsupported") return {};
-            return buildReasoningParams(thinkingLevel, { backend: "api", maxLevel: apiReasoning.maxLevel });
+            return buildReasoningParams(thinkingLevel, { backend: "api", levels: apiReasoning.levels });
         }
 
         // Ask the endpoint what it can do. llama.cpp's /props is the only fully reliable
@@ -2004,9 +2004,10 @@ Rules:
                     const p = await res.json();
                     const caps = p.chat_template_caps;
                     if (caps && typeof caps.supports_reasoning_effort === "boolean") {
+                        const caps_t = parseReasoningTemplateSupport(p.chat_template);
                         return {
                             state: caps.supports_reasoning_effort ? "supported" : "unsupported",
-                            maxLevel: parseReasoningTemplateSupport(p.chat_template).maxLevel,
+                            maxLevel: caps_t.maxLevel, levels: caps_t.levels,
                             source: "llama.cpp /props",
                         };
                     }
@@ -2014,7 +2015,7 @@ Rules:
                         const t = parseReasoningTemplateSupport(p.chat_template);
                         return {
                             state: t.supported ? "supported" : "unsupported",
-                            maxLevel: t.maxLevel,
+                            maxLevel: t.maxLevel, levels: t.levels,
                             source: "server chat template",
                         };
                     }
@@ -2031,12 +2032,12 @@ Rules:
                     const t = parseReasoningTemplateSupport(info.template);
                     return {
                         state: t.supported ? "supported" : "unsupported",
-                        maxLevel: t.maxLevel,
+                        maxLevel: t.maxLevel, levels: t.levels,
                         source: "Ollama /api/show",
                     };
                 }
             } catch (e) { /* not Ollama either */ }
-            return { state: "unknown", maxLevel: "high", source: "endpoint exposes no capability data" };
+            return { state: "unknown", maxLevel: "high", levels: ["low", "medium", "high"], source: "endpoint exposes no capability data" };
         }
 
         document.getElementById("reasoningProbeBtn").addEventListener("click", async (e) => {
@@ -2494,7 +2495,7 @@ Rules:
             API_KEY = document.getElementById("settingApiKey").value.trim() || "dummy";
             // A different endpoint invalidates whatever we learned about the old one.
             if (API_URL !== prevApiUrl) {
-                apiReasoning = { state: "unknown", maxLevel: "high", source: "not checked" };
+                apiReasoning = { state: "unknown", maxLevel: "high", levels: ["low", "medium", "high"], source: "not checked" };
                 apiReasoningRejected = false;
                 document.getElementById("reasoningProbeStatus").textContent = "Reasoning support: not checked";
             }
@@ -2682,12 +2683,22 @@ Rules:
             const t = typeof templateText === "string" ? templateText : "";
             const enableThinking = /enable_thinking/.test(t);
             const reasoningEffort = /reasoning_effort/.test(t);
+            // Templates that validate the value enumerate the accepted set, e.g.
+            //   {%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}
+            // and raise on anything else. Qwen3.5/3.8 do exactly this and reject the
+            // OpenAI-standard "high", which surfaces from the engine as an opaque error
+            // ("Invalid magic number"), so read the set out instead of guessing at it.
+            let levels = null;
+            const m = t.match(/reasoning_effort[\s\S]{0,240}?not\s+in\s*\(([^)]*)\)/);
+            if (m) levels = (m[1].match(/['"]([A-Za-z_]+)['"]/g) || []).map(x => x.replace(/['"]/g, ""));
+            // No explicit set: assume xhigh-style if the word appears, else OpenAI's trio.
+            if (!levels || !levels.length) levels = /xhigh/.test(t) ? ["low", "medium", "xhigh"] : ["low", "medium", "high"];
             return {
                 supported: enableThinking || reasoningEffort,
                 enableThinking,
                 reasoningEffort,
-                // Qwen3.5/3.8 name their top level "xhigh"; OpenAI-style templates cap at "high".
-                maxLevel: /xhigh/.test(t) ? "xhigh" : "high",
+                levels,
+                maxLevel: levels.includes("xhigh") ? "xhigh" : "high",
             };
         }
 
@@ -2698,26 +2709,39 @@ Rules:
         // Destructured inside the body, not in the signature: tests/extract.mjs slices
         // functions by brace matching and would cut a `{…}` parameter list short.
         function buildReasoningParams(level, opts) {
-            const { backend = "api", maxLevel = "high" } = opts || {};
+            const o = opts || {};
+            const backend = o.backend || "api";
+            const levels = Array.isArray(o.levels) && o.levels.length ? o.levels : ["low", "medium", "high"];
             if (!["off", "low", "medium", "high"].includes(level)) return {};
-            const effort = level === "high" ? maxLevel : level;
+            if (level === "off") return { chat_template_kwargs: { enable_thinking: false } };
+            // "high" is the UI's word for "this template's maximum" — xhigh where the
+            // template uses that name. A level the template doesn't accept is dropped
+            // rather than sent: passing an unlisted value makes the template raise, and
+            // omitting it just means the model's own default.
+            const wanted = level === "high" && levels.includes("xhigh") ? "xhigh" : level;
+            const effort = levels.includes(wanted) ? wanted : null;
             if (backend === "wllama") {
                 // wllama applies the GGUF's own template, so everything goes through kwargs.
-                return level === "off"
-                    ? { chat_template_kwargs: { enable_thinking: false } }
-                    : { chat_template_kwargs: { enable_thinking: true, reasoning_effort: effort } };
+                const kw = { enable_thinking: true };
+                if (effort) kw.reasoning_effort = effort;
+                return { chat_template_kwargs: kw };
             }
             // Remote: reasoning_effort is the OpenAI-standard field and llama.cpp honours
-            // it too. There is no standard way to say "off", so that one case falls back
-            // to the template kwarg that llama.cpp/vLLM/Qwen builds understand.
-            return level === "off"
-                ? { chat_template_kwargs: { enable_thinking: false } }
-                : { reasoning_effort: effort };
+            // it too. There is no standard way to say "off"; that case is handled above.
+            return effort ? { reasoning_effort: effort } : {};
         }
 
         // The param names buildReasoningParams can introduce — used to strip them from a
         // payload when a strict server rejects them.
         const REASONING_PARAM_KEYS = ["reasoning_effort", "chat_template_kwargs"];
+
+        // A strict server names the rejected JSON key, but a chat template that validates
+        // the value raises with prose instead ("Unexpected reasoning effort high…"), so
+        // match both shapes before deciding a 400 was our reasoning params' fault.
+        function looksLikeReasoningRejection(detail) {
+            const d = String(detail || "");
+            return REASONING_PARAM_KEYS.some(k => d.includes(k)) || /reasoning[ _]effort|enable[ _]thinking/i.test(d);
+        }
 
         // ========== Test Connection & Fetch Models ==========
         document.getElementById("testConnectionBtn").addEventListener("click", async (e) => {
@@ -3506,7 +3530,7 @@ Rules:
                 // params they ignore, which is why support can't be probed by sending one.
                 if (!response.ok && response.status === 400 && REASONING_PARAM_KEYS.some(k => k in payload)) {
                     const detail = await readDetail(response);
-                    if (REASONING_PARAM_KEYS.some(k => detail.includes(k))) {
+                    if (looksLikeReasoningRejection(detail)) {
                         const retryPayload = { ...payload };
                         for (const k of REASONING_PARAM_KEYS) delete retryPayload[k];
                         apiReasoningRejected = true;
