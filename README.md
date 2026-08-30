@@ -148,6 +148,8 @@ It is a reasoning model that **thinks at `xhigh` by default**, which is slow eno
 
 This rung was verified by hand rather than through the [benchmark harness](benchmark/), so it has no `avg TTFT` / `decode t/s` entry in the table above.
 
+For comparison, the same file under native `llama-server` on the same GPU decodes at [77–101 t/s](#llamacpp-llama-server) — about 10× faster. The browser build's appeal is that it needs no install and nothing leaves the tab, not throughput.
+
 ### Browser support & model size limits
 
 How large a model you can load — and how fast it runs — depends on two WebAssembly/GPU features of your browser, which wllama detects at load time:
@@ -199,6 +201,47 @@ Prefer to run the model outside the browser? The standalone build (`index.html` 
    To pin the allowlist instead, pass `--allowed-origins` a JSON array: `--allowed-origins '["https://example.com"]'`.
 2. **API URL:** `http://localhost:8000/v1/chat/completions`
 3. **Model Name:** the model you served (e.g., `meta-llama/Llama-3.1-8B-Instruct`).
+
+### llama.cpp (`llama-server`)
+1. Start `llama-server` with a GGUF. `--jinja` is the important flag — it applies the model's own chat template, which is what makes the 🧠 Think control work:
+   ```bash
+   llama-server --model model.gguf --jinja --host 0.0.0.0 --port 8080
+   ```
+2. **API URL:** `http://localhost:8080/v1/chat/completions`
+3. **Model Name:** anything — `llama-server` serves whichever model it loaded.
+4. *Tip:* add `--reasoning-format deepseek` for a reasoning model. It returns the trace in `reasoning_content`, which HermitUI renders in the collapsible think block. **Settings → Check Reasoning Support** reads this server's `/props` and will report reasoning support exactly.
+
+<details>
+<summary><b>A tuned 27B config, measured</b></summary>
+
+Qwen3.8-27B at 4 bpw on one RTX 5070 Ti (16 GB), using the model's own MTP layer for speculative decoding:
+
+```bash
+llama-server.exe --model Qwen3.8-27B-IQ4_XS-4.00bpw.gguf \
+  --ctx-size 40000 --jinja --reasoning-format deepseek --reasoning-preserve \
+  --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 \
+  --spec-type draft-mtp,ngram-mod --spec-draft-n-max 2 \
+  --cache-type-k-draft q8_0 --cache-type-v-draft q8_0 \
+  --n-gpu-layers all --threads 32 --batch-size 1024 --ubatch-size 1024 \
+  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat-penalty 1.0 \
+  --host 0.0.0.0 --port 8080
+```
+
+| Workload | With `--spec-type` | Without | Gain |
+|---|---:|---:|---:|
+| Prose (200-word explainer, ×3) | **77.1 t/s** | 50.4 t/s | 1.53× |
+| Reasoning prompt | **91–96 t/s** | — | ~1.85× |
+| Code generation | **100.7 t/s** | 50.2 t/s | **2.01×** |
+
+Prompt processing reached **1,489 t/s** on a 6,742-token prompt. The no-speculation baseline was flat to within 0.3 t/s across four runs, so those gains are signal rather than noise.
+
+**Draft acceptance explains the spread** — 98.7% on code, 82–88% on the reasoning prompt, 50–65% on prose. MTP predicts structured text far better than free prose, so the speedup is largest exactly where you generate code.
+
+⚠️ **Watch VRAM.** `--ctx-size 40000` plus the draft context sat at **15.9 GB of 16.3 GB** — ~400 MB spare. Removing the speculation flags freed ~860 MB. It runs, but leaves no room for anything else on the card, so lower the context before running a WebGPU browser alongside it.
+
+For scale: this is roughly **10× the ~8 t/s** the same model reaches in the [in-browser build](#qwen38-27b--verified-working-in-the-browser). Native is much faster — the browser build buys zero-install and privacy, not speed.
+
+</details>
 
 ### Cloud models (OpenRouter, OpenAI, Groq, …)
 1. **API URL:** the provider's chat completions endpoint (e.g., `https://openrouter.ai/api/v1/chat/completions`).
