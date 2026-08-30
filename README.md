@@ -212,12 +212,12 @@ Prefer to run the model outside the browser? The standalone build (`index.html` 
 4. *Tip:* add `--reasoning-format deepseek` for a reasoning model. It returns the trace in `reasoning_content`, which HermitUI renders in the collapsible think block. **Settings → Check Reasoning Support** reads this server's `/props` and will report reasoning support exactly.
 
 <details>
-<summary><b>A tuned 27B config, measured</b></summary>
+<summary><b>Reference config: a 27B on a 16 GB card, measured</b></summary>
 
-Qwen3.8-27B at 4 bpw on one RTX 5070 Ti (16 GB), using the model's own MTP layer for speculative decoding:
+**If you have a 16 GB GPU, this is a config that fits and what each flag costs.** Qwen3.8-27B at 4 bpw, one RTX 5070 Ti, using the model's own MTP layer for speculative decoding. Nothing here is card-specific except the numbers — the same reasoning applies to any 16 GB card.
 
 ```bash
-llama-server.exe --model Qwen3.8-27B-IQ4_XS-4.00bpw.gguf \
+llama-server --model Qwen3.8-27B-IQ4_XS-4.00bpw.gguf \
   --ctx-size 40000 --jinja --reasoning-format deepseek --reasoning-preserve \
   --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 \
   --spec-type draft-mtp,ngram-mod --spec-draft-n-max 2 \
@@ -226,6 +226,8 @@ llama-server.exe --model Qwen3.8-27B-IQ4_XS-4.00bpw.gguf \
   --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat-penalty 1.0 \
   --host 0.0.0.0 --port 8080
 ```
+
+**Speed** (`llama-server`'s own `timings`, so decode-only — TTFT excluded):
 
 | Workload | With `--spec-type` | Without | Gain |
 |---|---:|---:|---:|
@@ -237,9 +239,25 @@ Prompt processing reached **1,489 t/s** on a 6,742-token prompt. The no-speculat
 
 **Draft acceptance explains the spread** — 98.7% on code, 82–88% on the reasoning prompt, 50–65% on prose. MTP predicts structured text far better than free prose, so the speedup is largest exactly where you generate code.
 
-⚠️ **Watch VRAM.** `--ctx-size 40000` plus the draft context sat at **15.9 GB of 16.3 GB** — ~400 MB spare. Removing the speculation flags freed ~860 MB. It runs, but leaves no room for anything else on the card, so lower the context before running a WebGPU browser alongside it.
+**Where the VRAM goes**, at `--ctx-size 40000` — as `nvidia-smi` and the server's own load log report it:
 
-For scale: this is roughly **10× the ~8 t/s** the same model reaches in the [in-browser build](#qwen38-27b--verified-working-in-the-browser). Native is much faster — the browser build buys zero-install and privacy, not speed.
+| | VRAM |
+|---|---:|
+| Model weights on GPU (4 bpw) | 12,376 MiB |
+| Compute buffers (`--ubatch-size 1024`) | 396 MiB |
+| KV cache @ 40k `q8_0`, plus CUDA context overhead | ≈2,260 MiB |
+| MTP draft context (what `--spec-type` costs) | ≈860 MiB |
+| **Total resident** | **15,893 of 16,303 MiB** |
+
+That leaves roughly **410 MiB spare** — it runs, but with no room for anything else on the card. Don't run a WebGPU browser (including HermitUI's own in-browser mode) against the same GPU at this context size.
+
+**If it doesn't fit on your card, cut in this order:**
+
+1. **Lower `--ctx-size`.** The KV cache scales linearly with it, so halving 40k → 20k returns roughly 1,000 MiB. This is the cheapest VRAM you will find.
+2. **Keep `--cache-type-k q8_0 --cache-type-v q8_0`** (and `--flash-attn on`, which the quantized-KV path wants). `q8_0` stores one byte per element where f16 stores two, so reverting to f16 would roughly *double* the KV figure above — at 40k context that is the difference between fitting and not.
+3. **Drop `--spec-type` last.** It returns ~860 MiB but costs the 1.5–2.0× decode speedup above, so trade it away only once the context is as small as you can live with.
+
+For scale: this is roughly **10× the ~8 t/s** the same model reaches in the [in-browser build](#qwen38-27b--verified-working-in-the-browser). Native is far faster — the browser build buys zero-install and privacy, not speed.
 
 </details>
 
