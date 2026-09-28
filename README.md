@@ -221,7 +221,7 @@ llama-server --model Qwen3.8-27B-IQ4_XS-4.00bpw.gguf \
   --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 \
   --spec-type draft-mtp,ngram-mod --spec-draft-n-max 2 \
   --cache-type-k-draft q8_0 --cache-type-v-draft q8_0 \
-  --n-gpu-layers all --threads 32 --batch-size 1024 --ubatch-size 1024 \
+  --n-gpu-layers all --parallel 1 --threads 32 --batch-size 1024 --ubatch-size 1024 \
   --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat-penalty 1.0 \
   --host 0.0.0.0 --port 8080
 ```
@@ -237,6 +237,8 @@ llama-server --model Qwen3.8-27B-IQ4_XS-4.00bpw.gguf \
 Prompt processing reached **1,489 t/s** on a 6,742-token prompt. The no-speculation baseline was flat to within 0.3 t/s across four runs, so those gains are signal rather than noise.
 
 **Draft acceptance explains the spread** — 98.7% on code, 82–88% on the reasoning prompt, 50–65% on prose. MTP predicts structured text far better than free prose, so the speedup is largest exactly where you generate code.
+
+⚠️ **`--parallel 1` is not optional — it is worth 3.6×.** Omit it and the server defaults to 4 slots, which flips llama.cpp to a *unified* KV cache (`kv_unified = 'true'`) sized across all of them, so every decoded token does far more attention work. Measured on this machine, same GPU, same everything else: **20.4 t/s prose / 29.2 t/s code with 4 slots, versus 73.8 / 97.1 with one.** VRAM barely moves (~15.5 GB either way), so nothing looks wrong — you just silently lose three quarters of your throughput. Check `total_slots` at `http://localhost:8080/props`; it must read `1`.
 
 **Where the VRAM goes**, at `--ctx-size 40000` — as `nvidia-smi` and the server's own load log report it:
 
