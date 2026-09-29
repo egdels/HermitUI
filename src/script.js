@@ -490,6 +490,56 @@ Rules:
             return !(host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host) || host === "[::1]" || host === "::1");
         }
 
+        // One line of "what to do about it" shown under a failed reply; the raw error stays
+        // visible above it. Replaces a fixed "is your local server running / CORS?" line that
+        // was wrong for every failure except a network error, and meaningless for the
+        // in-browser model. Pure (the caller passes the backend and mixed-content state), so
+        // it is unit-tested. "" means the error text already says everything useful.
+        // (Options are read in the body, not destructured in the signature: tests/extract.mjs
+        // slices functions by brace matching from the declaration.)
+        function chatErrorHint(message, opts) {
+            const { backend = "api", apiUrl = "", mixedContent = false } = opts || {};
+            const msg = String(message || "");
+            if (backend === "wllama") {
+                if (/not loaded/i.test(msg)) return "";
+                // What a dead or out-of-memory engine looks like from the outside: the
+                // worker's replies stop deserializing, or the wasm traps.
+                if (/Invalid magic number|out of memory|memory access out of bounds|unreachable|\bABORT/i.test(msg)) {
+                    return "The in-browser engine stopped responding — usually it ran out of memory. "
+                        + "Reload the model in Settings with a smaller Context Window, or pick a smaller model.";
+                }
+                return "The 🐛 debug console has the engine's full log.";
+            }
+            const status = Number((msg.match(/^Server Error (\d{3})\b/) || [])[1] || 0);
+            if (status === 401 || status === 403) return "The server rejected the request's credentials — check the API key in Settings.";
+            if (status === 404) return "Nothing answered at that address — check the API Base URL and the model name in Settings.";
+            if (status === 429) return "Rate-limited or out of quota — wait a moment, or check your provider account.";
+            if (status >= 500) return "The server failed while handling the request — its own logs will say why.";
+            if (/context (?:length|size|window)|n_ctx|too many tokens|maximum context/i.test(msg)) {
+                return "The conversation no longer fits the model's context — start a New Chat or raise the server's context size.";
+            }
+            // Chrome says "Failed to fetch", Firefox "NetworkError when attempting to fetch
+            // resource", Safari "Load failed" — all of them hide the actual reason.
+            if (/Failed to fetch|NetworkError|^Load failed$/i.test(msg)) {
+                if (mixedContent) return "This page is served over https, so the browser blocks plain-http servers on your network — use localhost, an https endpoint, or open HermitUI over http.";
+                return isLocalEndpoint(apiUrl)
+                    ? `Couldn't reach ${apiUrl} — make sure the server is running and allows CORS from this page.`
+                    : `Couldn't reach ${apiUrl} — check the URL and your connection; the provider must also allow requests from a browser (CORS).`;
+            }
+            return "";
+        }
+
+        // The error block appended to a failed reply: the raw error plus its hint.
+        // escapeHtml (not sanitize): angle-bracketed text in server errors must display
+        // literally instead of being stripped.
+        function chatErrorHtml(error) {
+            const hint = chatErrorHint(error.message, {
+                backend: activeBackend(), apiUrl: API_URL, mixedContent: isBlockedMixedContent(API_URL),
+            });
+            return `<br><br><span style='color:#ef4444; font-weight:500;'>❌ ${escapeHtml(error.message || "Unknown Error")}</span>`
+                + (hint ? `<br><span style='color:#9ca3af; font-size:0.9rem;'>${escapeHtml(hint)}</span>` : "");
+        }
+
         function updateMainCloudWarning() {
             const label = describeRemoteEndpoint(API_URL);
             const banner = document.getElementById("mainScreenCloudWarning");
@@ -1272,13 +1322,14 @@ Rules:
                 }
 
                 const useWebGpu = document.getElementById("wllamaWebGpuToggle").checked;
-                // 0 (or blank) leaves n_ctx unset so wllama uses the model's trained context.
+                // 0 (or blank) leaves n_ctx unset. That is wllama's own default (1024 in
+                // 3.6.1), not the model's trained context.
                 const nCtx = parseInt(document.getElementById("settingWllamaCtx").value, 10);
                 const requestedCtx = Number.isFinite(nCtx) && nCtx > 0 ? nCtx : null;
                 let attemptCtx = requestedCtx;
 
                 // The KV cache grows linearly with n_ctx and easily reaches gigabytes,
-                // so a generous context (default 32768) can exceed the WASM heap /
+                // so a generous context (default 16384) can exceed the WASM heap /
                 // available memory — the engine then dies with a cryptic "(ABORT)".
                 // Instead of failing, retry with a halved context until it fits (floor 4096).
                 while (true) {
@@ -1342,7 +1393,9 @@ Rules:
                         // to zephyr and every call fails with an opaque "Invalid magic number" —
                         // so treat it as the load failure it is and let the retry halve n_ctx.
                         if (wllamaInstance.getLoadedContextInfo().success === false) {
-                            throw new Error("not enough memory to create the model context");
+                            const ctxErr = new Error("not enough memory to create the model context");
+                            ctxErr.name = "ContextAllocError";
+                            throw ctxErr;
                         }
                         wllamaLog("log", `Model loaded in ${((performance.now() - loadStart) / 1000).toFixed(1)}s`);
                         break;
@@ -1350,7 +1403,14 @@ Rules:
                         try { await wllamaInstance.exit(); }
                         catch (exitErr) { wllamaLog("debug", "Cleanup after failed load:", exitErr.message || exitErr); }
                         wllamaInstance = null;
-                        if (!attemptCtx || attemptCtx <= 4096) throw loadErr;
+                        if (!attemptCtx || attemptCtx <= 4096) {
+                            // Out of retries: say what to change instead of just "failed".
+                            if (loadErr.name === "ContextAllocError") {
+                                loadErr.message = `not enough memory for this model${attemptCtx ? ` even with a ${attemptCtx}-token context` : ""}. `
+                                    + `Try a smaller model or quantization${useWebGpu || !WLLAMA_HAS_WEBGPU ? "" : ", or enable WebGPU so the context lives in GPU memory"}.`;
+                            }
+                            throw loadErr;
+                        }
                         const halved = Math.max(4096, Math.floor(attemptCtx / 2));
                         wllamaLog("warn", `Load with n_ctx=${attemptCtx} failed (${loadErr.message || loadErr}) — likely out of memory, retrying with n_ctx=${halved}. Lower the Context Window setting to skip these retries.`);
                         statusEl.textContent = `Status: Not enough memory for a ${attemptCtx}-token context — retrying with ${halved}…`;
@@ -2258,9 +2318,7 @@ Rules:
                     }
                 },
                 onFailure: (error, ctx) => {
-                    // escapeHtml (not sanitize): angle-bracketed text in server errors
-                    // must display literally instead of being stripped.
-                    ctx.responseContainer.insertAdjacentHTML("beforeend", `<br><span style='color:#ef4444;'>❌ ${escapeHtml(error.message)}</span>`);
+                    ctx.responseContainer.insertAdjacentHTML("beforeend", chatErrorHtml(error));
                 }
             });
 
@@ -3282,10 +3340,7 @@ Rules:
                     messages.push({"role": "assistant", "content": buildFinalHistory(ctx.fullRawText, ctx.aiReasoning), uid});
                 },
                 onFailure: (error, ctx) => {
-                    const errMsg = error.message || "Unknown Error";
-                    // escapeHtml (not sanitize): angle-bracketed text in server errors
-                    // must display literally instead of being stripped.
-                    ctx.responseContainer.insertAdjacentHTML('beforeend', `<br><br><span style='color:#ef4444; font-weight:500;'>❌ ${escapeHtml(errMsg)}</span><br><span style='color:#9ca3af; font-size:0.9rem;'>Make sure your local server is running and CORS is enabled.</span>`);
+                    ctx.responseContainer.insertAdjacentHTML('beforeend', chatErrorHtml(error));
                 }
             });
         });

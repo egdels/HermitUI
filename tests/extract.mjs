@@ -73,6 +73,7 @@ ${fn("buildReasoningParams")}
 ${fn("detectCloudProvider")}
 ${fn("isLocalEndpoint")}
 ${fn("describeRemoteEndpoint")}
+${fn("chatErrorHint")}
 ${fn("isTextFile")}
 ${fn("isImageFile")}
 ${fn("modelSupportsVision")}
@@ -87,7 +88,7 @@ export {
     splitContextBlocks, exportMd,
     parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint, apiRoot,
     parseReasoningTemplateSupport, buildReasoningParams,
-    detectCloudProvider, isLocalEndpoint, describeRemoteEndpoint,
+    detectCloudProvider, isLocalEndpoint, describeRemoteEndpoint, chatErrorHint,
     isTextFile, isImageFile, modelSupportsVision,
     modelReportsVision, extractModelId, normalizeGgufUrl, detectTemplateFromArch,
     buildWllamaPrompt,

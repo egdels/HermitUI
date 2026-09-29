@@ -1,6 +1,6 @@
 // Unit tests for the pure logic HermitUI depends on outside of Export/Import:
 // think-tag parsing, endpoint normalization, the cloud-provider warning, file-type
-// gating, the render throttle, and the wllama prompt builders. Run with:
+// gating, the render throttle, the wllama prompt builders and chat error hints. Run with:
 //   node tests/core.test.mjs
 // Everything under test is sliced out of src/script.js by extract.mjs, so a rename
 // there fails loudly here instead of silently skipping coverage.
@@ -13,6 +13,7 @@ const {
     isTextFile, isImageFile, modelSupportsVision,
     modelReportsVision, extractModelId, normalizeGgufUrl, detectTemplateFromArch,
     buildWllamaPrompt, apiRoot, parseReasoningTemplateSupport, buildReasoningParams,
+    chatErrorHint,
 } = H;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -395,6 +396,47 @@ section("13. capability-endpoint base URL");
     check("tolerates a trailing slash", apiRoot("http://localhost:8080/v1/") === "http://localhost:8080", apiRoot("http://localhost:8080/v1/"));
     check("leaves a bare origin alone", apiRoot("http://localhost:11434") === "http://localhost:11434", apiRoot("http://localhost:11434"));
     check("keeps a non-version path prefix", apiRoot("https://host/openai/v1") === "https://host/openai", apiRoot("https://host/openai/v1"));
+}
+
+// The hint under a failed reply must match the failure — the old fixed "is your local
+// server running / CORS?" line was wrong for everything but a network error.
+section("14. chat error hints");
+{
+    const api = (m, o = {}) => chatErrorHint(m, { backend: "api", apiUrl: "http://localhost:1234/v1", ...o });
+    const local = m => chatErrorHint(m, { backend: "wllama" });
+
+    check("a dead in-browser engine points at memory, not at a server",
+        /ran out of memory/.test(local("Invalid magic number")) && !/CORS|server/i.test(local("Invalid magic number")), local("Invalid magic number"));
+    check("an unloaded local model needs no extra hint (the message says it)",
+        local("Local model not loaded. Please select a .gguf file in settings.") === "");
+    check("other local failures point at the debug console",
+        /debug console/.test(local("something odd")), local("something odd"));
+
+    check("401 points at the API key", /API key/.test(api("Server Error 401: Unauthorized")), api("Server Error 401: Unauthorized"));
+    check("403 points at the API key", /API key/.test(api("Server Error 403: Forbidden")));
+    check("404 points at URL and model name", /API Base URL/.test(api("Server Error 404: Not Found")));
+    check("429 says rate-limited", /Rate-limited/.test(api("Server Error 429: Too Many Requests")));
+    check("5xx points at the server's logs", /server failed/.test(api("Server Error 503: Service Unavailable")));
+    check("a context overflow suggests a new chat",
+        /New Chat/.test(api("the request exceeds the available context size, try increasing it")),
+        api("the request exceeds the available context size, try increasing it"));
+    check("a plain 400 with a clear message adds nothing", api("Server Error 400: invalid temperature") === "");
+
+    // Each browser words a network failure differently.
+    for (const m of ["Failed to fetch", "NetworkError when attempting to fetch resource.", "Load failed"]) {
+        check(`network error "${m}" on a local URL mentions CORS and the URL`,
+            /CORS/.test(api(m)) && api(m).includes("http://localhost:1234/v1"), api(m));
+    }
+    check("a network error to a cloud URL doesn't claim a local server",
+        !/server is running/.test(api("Failed to fetch", { apiUrl: "https://api.openai.com/v1" })),
+        api("Failed to fetch", { apiUrl: "https://api.openai.com/v1" }));
+    check("blocked mixed content wins over the generic network hint",
+        /https/.test(api("Failed to fetch", { mixedContent: true })) && !/CORS/.test(api("Failed to fetch", { mixedContent: true })));
+    check("\"Load failed\" only matches as the whole message",
+        !/CORS/.test(api("Load failed: model file missing")), api("Load failed: model file missing"));
+
+    check("works with no options object", typeof chatErrorHint("Failed to fetch") === "string");
+    check("tolerates an undefined message", chatErrorHint(undefined, { backend: "api" }) === "");
 }
 
 report();

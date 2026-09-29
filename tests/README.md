@@ -30,7 +30,11 @@ as hostname suffixes — `mybox.ai` must not trip the `x.ai` warning), `isTextFi
 `normalizeGgufUrl` (the three accepted URL shapes plus the rejections), and
 `detectTemplateFromArch` / `buildWllamaPrompt` (prompt wrapping asserted byte for byte,
 since a malformed prompt only shows up as a model answering badly). Section 10 covers
-`createThrottle`, which is timing-based and uses real timers.
+`createThrottle`, which is timing-based and uses real timers. Section 14 covers
+`chatErrorHint`, the one-line advice under a failed reply: each failure class (dead
+in-browser engine, 401/403, 404, 429, 5xx, context overflow, each browser's wording of a
+network error, blocked mixed content) must get its own hint, and none may fall back to the
+old "is your local server running?" line where it doesn't apply.
 
 ## Export/Import round-trip — `export-import.test.mjs`
 
