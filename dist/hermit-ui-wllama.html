@@ -4629,6 +4629,15 @@ Rules:
                     const loadStart = performance.now();
                     try {
                         await wllamaInstance.loadModel(blobs, loadOptions);
+                        // wllama resolves loadModel even when llama.cpp could not create the
+                        // context (e.g. the KV cache for a large n_ctx doesn't fit the WASM
+                        // heap): it hands back success:false with empty metadata instead of
+                        // throwing. Carrying on leaves a dead engine — the template falls back
+                        // to zephyr and every call fails with an opaque "Invalid magic number" —
+                        // so treat it as the load failure it is and let the retry halve n_ctx.
+                        if (wllamaInstance.getLoadedContextInfo().success === false) {
+                            throw new Error("not enough memory to create the model context");
+                        }
                         wllamaLog("log", `Model loaded in ${((performance.now() - loadStart) / 1000).toFixed(1)}s`);
                         break;
                     } catch (loadErr) {
