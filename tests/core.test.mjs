@@ -420,6 +420,11 @@ section("14. chat error hints");
     check("a context overflow suggests a new chat",
         /New Chat/.test(api("the request exceeds the available context size, try increasing it")),
         api("the request exceeds the available context size, try increasing it"));
+    for (const m of ["Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON", "JSON.parse: unexpected character at line 1 column 1 of the JSON data"]) {
+        check(`an HTML answer ("${m.slice(0, 20)}…") points at the Base URL`, /API Base URL/.test(api(m)), api(m));
+    }
+    check("a server's own JSON complaint isn't blamed on the Base URL",
+        !/API Base URL/.test(api("Server Error 400: Unexpected token } in JSON at position 12")));
     check("a plain 400 with a clear message adds nothing", api("Server Error 400: invalid temperature") === "");
 
     // Each browser words a network failure differently.

@@ -515,6 +515,12 @@ Rules:
             if (status === 404) return "Nothing answered at that address — check the API Base URL and the model name in Settings.";
             if (status === 429) return "Rate-limited or out of quota — wait a moment, or check your provider account.";
             if (status >= 500) return "The server failed while handling the request — its own logs will say why.";
+            // response.json() on an HTML page: Chrome "Unexpected token '<'…is not valid JSON",
+            // Firefox "JSON.parse: unexpected character" — never a server's own error text. (Safari's "The string did not match
+            // the expected pattern" is left out: it also means a malformed URL.)
+            if (!status && /is not valid JSON|JSON\.parse|Unexpected token/i.test(msg)) {
+                return "The server answered, but not with JSON — the API Base URL probably points at a web page instead of the API (it usually ends in /v1).";
+            }
             if (/context (?:length|size|window)|n_ctx|too many tokens|maximum context/i.test(msg)) {
                 return "The conversation no longer fits the model's context — start a New Chat or raise the server's context size.";
             }
@@ -1254,9 +1260,23 @@ Rules:
             const warnings = [];
             if (!WLLAMA_HAS_JSPI) warnings.push("⚠️ This browser can't stream-load models (no WebAssembly JSPI) — GGUF files over ~3 GB will fail. Use Chrome/Edge or Firefox 153+.");
             if (!WLLAMA_HAS_WEBGPU) warnings.push("⚠️ WebGPU is unavailable — inference will run on CPU only (slower).");
+            // Browser-sniffing on purpose: this is a known Firefox bug, not a missing
+            // capability. Firefox polls WebGPU completions on a fixed 100 ms timer, so each
+            // of llama.cpp's several GPU readbacks per token waits up to 100 ms and decode
+            // drops below 1 tok/s with the GPU nearly idle (measured: 0.6B at ~0.7 tok/s on an
+            // RTX 5070 Ti). Drop this once the bug below ships.
+            if (WLLAMA_HAS_WEBGPU && /\bFirefox\//.test(navigator.userAgent)) {
+                const link = document.createElement("a");
+                link.href = "https://bugzilla.mozilla.org/show_bug.cgi?id=1870699";
+                link.target = "_blank";
+                link.rel = "noopener noreferrer";
+                link.textContent = "Firefox bug 1870699";
+                warnings.push(["⚠️ WebGPU in Firefox is currently very slow for in-browser models (often under 1 tok/s) because of ",
+                    link, ". Untick “Enable WebGPU” below — CPU is faster here — or use Chrome/Edge for GPU speed."]);
+            }
             if (warnings.length) {
                 const el = document.getElementById("wllamaCapabilityHint");
-                el.textContent = warnings.join(" ");
+                warnings.forEach((w, i) => el.append(...(i ? [" "] : []), ...[].concat(w)));
                 el.style.display = "block";
             }
         })();
@@ -1571,7 +1591,17 @@ Rules:
         async function downloadGgufToBlob(url, onProgress, signal) {
             // Aborting the signal makes reader.read() below reject with AbortError.
             const res = await fetch(url, { signal });
-            if (!res.ok) throw new Error(`Download failed: HTTP ${res.status} ${res.statusText}`);
+            if (!res.ok) {
+                // HTTP/2 responses carry no statusText, so it can't be the explanation.
+                const why = res.status === 401 || res.status === 403
+                    ? " — the file is gated or private. Accept its license on Hugging Face, download it there, and use the file picker instead."
+                    : res.status === 404
+                        ? " — no file at that URL. Check the repo and file name (they are case-sensitive)."
+                        : res.status === 429
+                            ? " — rate-limited by the host. Wait a moment and retry."
+                            : (res.statusText ? ` ${res.statusText}` : "");
+                throw new Error(`Download failed: HTTP ${res.status}${why}`);
+            }
             const total = parseInt(res.headers.get("content-length") || "0", 10);
             // Fail before pulling gigabytes the engine can't load anyway.
             const sizeErr = wllamaPreflightSize(total);
@@ -1813,7 +1843,8 @@ Rules:
         });
 
         let toastTimeout = null;
-        function showToast(message) {
+        function showToast(message, opts) {
+            const { error = false } = opts || {};
             let toast = document.getElementById("toastNotification");
             if (!toast) {
                 toast = document.createElement("div");
@@ -1826,9 +1857,11 @@ Rules:
                 document.body.appendChild(toast);
             }
             toast.textContent = message;
+            toast.classList.toggle("error", error);
             toast.classList.add("show");
             if (toastTimeout) clearTimeout(toastTimeout);
-            toastTimeout = setTimeout(() => toast.classList.remove("show"), 2500);
+            // An error with advice needs reading time; a success only needs a glance.
+            toastTimeout = setTimeout(() => toast.classList.remove("show"), error ? 8000 : 2500);
         }
 
         // ========== Vision capability detection (best-effort) ==========
@@ -1983,15 +2016,19 @@ Rules:
                     headers: { "Authorization": "Bearer " + currentKey }
                 });
 
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                
+                if (!response.ok) {
+                    let detail = response.statusText || "Unknown Error";
+                    try { detail = (await response.json()).error?.message || detail; } catch { /* not JSON */ }
+                    throw new Error(`Server Error ${response.status}: ${detail}`);
+                }
+
                 const data = await response.json();
                 let models = data.data || [];
                 if (!Array.isArray(models)) {
                     models = Array.isArray(data) ? data : (data.models || []);
                 }
 
-                if (models.length === 0) throw new Error("No models found in response.");
+                if (models.length === 0) throw new Error("the server answered but lists no models — load one on the server, or type the model name in manually.");
 
                 const select = document.getElementById("settingModelSelect");
                 const input = document.getElementById("settingModelInput");
@@ -2025,7 +2062,11 @@ Rules:
                 showToast(`✅ Connection successful! Found ${models.length} models.`);
             } catch (error) {
                 console.error("Test connection failed:", error);
-                showToast(`❌ Connection failed: ${error.message}`);
+                const baseUrl = document.getElementById("settingUrl").value.trim();
+                const hint = chatErrorHint(error.message, {
+                    backend: "api", apiUrl: baseUrl, mixedContent: isBlockedMixedContent(baseUrl),
+                });
+                showToast(`❌ Connection failed: ${error.message}${hint ? "\n" + hint : ""}`, { error: true });
             } finally {
                 btn.innerHTML = originalText;
                 btn.disabled = false;
@@ -2244,7 +2285,7 @@ Rules:
                 console.error("Import failed:", error);
             }
             if (!parsed) {
-                showToast("❌ Not a HermitUI chat export.");
+                showToast("❌ Not a HermitUI chat export.", { error: true });
                 return;
             }
             // Only ask when there is actually something to lose.

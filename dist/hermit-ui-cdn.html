@@ -861,9 +861,17 @@
             font-size: 0.95rem;
             z-index: 9999;
             box-shadow: 0 4px 12px rgba(22, 163, 74, 0.3);
+            width: max-content; /* left: 50% would otherwise cap it at half the viewport */
+            max-width: calc(100vw - 32px);
+            box-sizing: border-box;
+            white-space: pre-line; /* an error toast puts its advice on a second line */
             opacity: 0;
             visibility: hidden;
             transition: all 0.3s ease;
+        }
+        .toast.error {
+            background: #dc2626;
+            box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);
         }
         .toast.show {
             opacity: 1;
@@ -1315,7 +1323,7 @@
 
     <header>
         <div class="header-left">
-            <h2>HermitUI <span class="version-badge">v0.9.1</span></h2>
+            <h2>HermitUI <span class="version-badge">v0.9.2</span></h2>
             <div class="model-badge" title="Current Model">
                 🤖 <span id="overlayModel">local-model</span> @ <span id="overlayUrl">http://localhost:1234</span>
             </div>
@@ -2040,6 +2048,12 @@ Rules:
             if (status === 404) return "Nothing answered at that address — check the API Base URL and the model name in Settings.";
             if (status === 429) return "Rate-limited or out of quota — wait a moment, or check your provider account.";
             if (status >= 500) return "The server failed while handling the request — its own logs will say why.";
+            // response.json() on an HTML page: Chrome "Unexpected token '<'…is not valid JSON",
+            // Firefox "JSON.parse: unexpected character" — never a server's own error text. (Safari's "The string did not match
+            // the expected pattern" is left out: it also means a malformed URL.)
+            if (!status && /is not valid JSON|JSON\.parse|Unexpected token/i.test(msg)) {
+                return "The server answered, but not with JSON — the API Base URL probably points at a web page instead of the API (it usually ends in /v1).";
+            }
             if (/context (?:length|size|window)|n_ctx|too many tokens|maximum context/i.test(msg)) {
                 return "The conversation no longer fits the model's context — start a New Chat or raise the server's context size.";
             }
@@ -2787,7 +2801,8 @@ Rules:
         });
 
         let toastTimeout = null;
-        function showToast(message) {
+        function showToast(message, opts) {
+            const { error = false } = opts || {};
             let toast = document.getElementById("toastNotification");
             if (!toast) {
                 toast = document.createElement("div");
@@ -2800,9 +2815,11 @@ Rules:
                 document.body.appendChild(toast);
             }
             toast.textContent = message;
+            toast.classList.toggle("error", error);
             toast.classList.add("show");
             if (toastTimeout) clearTimeout(toastTimeout);
-            toastTimeout = setTimeout(() => toast.classList.remove("show"), 2500);
+            // An error with advice needs reading time; a success only needs a glance.
+            toastTimeout = setTimeout(() => toast.classList.remove("show"), error ? 8000 : 2500);
         }
 
         // ========== Vision capability detection (best-effort) ==========
@@ -2957,15 +2974,19 @@ Rules:
                     headers: { "Authorization": "Bearer " + currentKey }
                 });
 
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                
+                if (!response.ok) {
+                    let detail = response.statusText || "Unknown Error";
+                    try { detail = (await response.json()).error?.message || detail; } catch { /* not JSON */ }
+                    throw new Error(`Server Error ${response.status}: ${detail}`);
+                }
+
                 const data = await response.json();
                 let models = data.data || [];
                 if (!Array.isArray(models)) {
                     models = Array.isArray(data) ? data : (data.models || []);
                 }
 
-                if (models.length === 0) throw new Error("No models found in response.");
+                if (models.length === 0) throw new Error("the server answered but lists no models — load one on the server, or type the model name in manually.");
 
                 const select = document.getElementById("settingModelSelect");
                 const input = document.getElementById("settingModelInput");
@@ -2999,7 +3020,11 @@ Rules:
                 showToast(`✅ Connection successful! Found ${models.length} models.`);
             } catch (error) {
                 console.error("Test connection failed:", error);
-                showToast(`❌ Connection failed: ${error.message}`);
+                const baseUrl = document.getElementById("settingUrl").value.trim();
+                const hint = chatErrorHint(error.message, {
+                    backend: "api", apiUrl: baseUrl, mixedContent: isBlockedMixedContent(baseUrl),
+                });
+                showToast(`❌ Connection failed: ${error.message}${hint ? "\n" + hint : ""}`, { error: true });
             } finally {
                 btn.innerHTML = originalText;
                 btn.disabled = false;
@@ -3218,7 +3243,7 @@ Rules:
                 console.error("Import failed:", error);
             }
             if (!parsed) {
-                showToast("❌ Not a HermitUI chat export.");
+                showToast("❌ Not a HermitUI chat export.", { error: true });
                 return;
             }
             // Only ask when there is actually something to lose.
