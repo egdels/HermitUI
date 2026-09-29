@@ -757,6 +757,11 @@
             outline: none;
             transition: border-color 0.2s;
         }
+        .modal input[type="checkbox"] {
+            width: auto;
+            margin: 0;
+            flex-shrink: 0;
+        }
         .modal input:focus, .modal textarea:focus {
             border-color: var(--primary);
             box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
@@ -776,14 +781,29 @@
             color: var(--primary);
             text-transform: uppercase;
             letter-spacing: 0.05em;
-            margin-bottom: 12px;
             user-select: none;
+        }
+        .advanced-params[open] > summary {
+            margin-bottom: 12px;
         }
         .advanced-params > summary:hover {
             opacity: 0.8;
         }
-        .advanced-params input:last-child {
+        .advanced-params input:last-child, .advanced-params textarea:last-child {
             margin-bottom: 0;
+        }
+        .field-hint {
+            font-size: 0.75rem;
+            color: #999;
+            margin-bottom: 8px;
+        }
+        .visually-hidden {
+            position: absolute !important;
+            width: 1px;
+            height: 1px;
+            overflow: hidden;
+            clip-path: inset(50%);
+            white-space: nowrap;
         }
         .modal-actions {
             display: flex;

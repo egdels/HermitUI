@@ -144,7 +144,7 @@
                     <input type="text" id="settingWllamaUrl" placeholder="https://huggingface.co/…/resolve/main/model.gguf  or  hf:user/repo/file.gguf" style="flex: 1; margin-bottom: 0; min-width: 0;">
                     <button type="button" class="action-btn" id="wllamaUrlLoadBtn" style="flex-shrink: 0; color: var(--primary); font-weight: 600; font-size: 0.85rem; padding: 0 14px; border: 1px solid var(--primary); border-radius: 12px;">⬇️ Load</button>
                 </div>
-                <div style="font-size: 0.75rem; color: #999; margin: 4px 0 8px;">Accepts direct <code>.gguf</code> links, Hugging Face <code>/blob/</code> page URLs, or <code>hf:user/repo/file.gguf</code>. The model streams straight into memory — nothing is ever stored, so it is fetched again next session.<span id="wllamaSaveCopyHint" style="display: none;"> <a id="wllamaSaveCopyLink" href="#" target="_blank" rel="noopener noreferrer" download>💾 Save a copy to disk</a> to avoid that: download it once, then load it with the file picker above.</span></div>
+                <div class="field-hint" style="margin-top: 4px;">A <code>.gguf</code> link, Hugging Face page URL or <code>hf:user/repo/file.gguf</code>. Held in memory only, never stored.<span id="wllamaSaveCopyHint" style="display: none;"> <a id="wllamaSaveCopyLink" href="#" target="_blank" rel="noopener noreferrer" download>💾 Save a copy</a> to skip the download next time.</span></div>
 
                 <div id="wllamaStatusContainer" style="margin-bottom: 8px;">
                     <div id="wllamaStatus" style="font-size: 0.85rem; color: #666; word-break: break-all; margin-bottom: 4px;">Status: Unloaded</div>
@@ -153,35 +153,36 @@
                     </div>
                 </div>
 
-                <label for="settingWllamaTemplate">Chat Format</label>
-                <select id="settingWllamaTemplate" style="margin-bottom: 8px; width: 100%;">
-                    <option value="auto">Auto (detect from model)</option>
-                    <option value="chatml">ChatML (Qwen, Yi, OpenHermes)</option>
-                    <option value="llama3">Llama 3</option>
-                    <option value="mistral">Mistral / Mixtral</option>
-                    <option value="gemma">Gemma</option>
-                    <option value="phi3">Phi-3</option>
-                    <option value="zephyr">Zephyr</option>
-                    <option value="alpaca">Alpaca (instruct)</option>
-                    <option value="raw">Raw (no template)</option>
-                </select>
-                <div id="wllamaTemplateHint" style="font-size: 0.75rem; color: #999; margin-bottom: 8px;">Auto uses the model's embedded template when present, else infers from its architecture.</div>
+                <details class="advanced-params">
+                    <summary>Model options</summary>
+                    <label for="settingWllamaTemplate">Chat Format</label>
+                    <select id="settingWllamaTemplate" style="margin-bottom: 8px; width: 100%;">
+                        <option value="auto">Auto (detect from model)</option>
+                        <option value="chatml">ChatML (Qwen, Yi, OpenHermes)</option>
+                        <option value="llama3">Llama 3</option>
+                        <option value="mistral">Mistral / Mixtral</option>
+                        <option value="gemma">Gemma</option>
+                        <option value="phi3">Phi-3</option>
+                        <option value="zephyr">Zephyr</option>
+                        <option value="alpaca">Alpaca (instruct)</option>
+                        <option value="raw">Raw (no template)</option>
+                    </select>
+                    <div id="wllamaTemplateHint" class="field-hint">Auto reads the model's embedded template.</div>
 
-                <label for="settingWllamaCtx">Context Window (tokens)</label>
-                <input type="number" id="settingWllamaCtx" value="16384" min="0" step="512" style="margin-bottom: 4px; width: 100%;">
-                <div style="font-size: 0.75rem; color: #999; margin-bottom: 8px;">Larger = more history but more memory/slower load (the KV cache grows with it). If it doesn't fit, the load retries with half the context automatically. 0 = wllama's default (1024). Applied when the model is loaded.</div>
+                    <label for="settingWllamaCtx">Context Window (tokens)</label>
+                    <input type="number" id="settingWllamaCtx" value="16384" min="0" step="512" style="margin-bottom: 4px; width: 100%;">
+                    <div class="field-hint">Applied on load. Halved automatically if it doesn't fit; 0 = 1024.</div>
 
-                <label for="settingWllamaMaxTokens">Max Output Tokens (per reply)</label>
-                <input type="number" id="settingWllamaMaxTokens" value="4096" min="1" step="128" style="margin-bottom: 4px; width: 100%;">
-                <div style="font-size: 0.75rem; color: #999; margin-bottom: 8px;">Upper bound on tokens generated per reply. Applied immediately (no reload needed). Must fit within the context window.</div>
+                    <label for="settingWllamaMaxTokens">Max Output Tokens (per reply)</label>
+                    <input type="number" id="settingWllamaMaxTokens" value="4096" min="1" step="128" style="margin-bottom: 4px; width: 100%;">
+                    <div class="field-hint">Applied immediately; must fit the context window.</div>
 
-                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-                    <input type="checkbox" id="wllamaWebGpuToggle" checked>
-                    <label for="wllamaWebGpuToggle" style="margin: 0; font-size: 0.85rem;">Enable WebGPU (Hardware Acceleration)</label>
-                </div>
-                <div style="font-size: 0.75rem; color: #999;">Note: On some systems (especially integrated graphics) WebGPU may be slower than CPU. Uncheck to force CPU-only mode.</div>
-
-                <div style="font-size: 0.75rem; color: #999; margin-top: 10px;">🐛 Debug output (engine load, model metadata, chosen template, the prompt sent, tokens/sec) streams to the drop-down console at the top of the screen — click the <b>🐛</b> button in the header.</div>
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                        <input type="checkbox" id="wllamaWebGpuToggle" checked>
+                        <label for="wllamaWebGpuToggle" style="margin: 0; font-size: 0.85rem;">Enable WebGPU (Hardware Acceleration)</label>
+                    </div>
+                    <div class="field-hint">Can be slower than CPU on integrated graphics. Engine logs: the <b>🐛</b> header button.</div>
+                </details>
             </div>
 
             <div id="apiSettingsGroup">
@@ -220,10 +221,10 @@
             <!-- @wllama:start -->
             </div>
             <!-- @wllama:end -->
-            <label for="settingTemperature">Temperature</label>
-            <input type="number" id="settingTemperature" value="0.7" step="0.1" min="0" max="2">
             <details class="advanced-params">
-                <summary>Advanced parameters</summary>
+                <summary>Sampling parameters</summary>
+                <label for="settingTemperature">Temperature</label>
+                <input type="number" id="settingTemperature" value="0.7" step="0.1" min="0" max="2">
                 <label for="settingMaxTokens">Max Tokens</label>
                 <input type="number" id="settingMaxTokens" placeholder="unlimited" step="1" min="1">
                 <label for="settingTopP">Top P</label>
@@ -235,9 +236,12 @@
                 <label for="settingSeed">Seed</label>
                 <input type="number" id="settingSeed" placeholder="random" step="1">
             </details>
-            <label for="settingSystem">System Prompt</label>
-            <!-- Filled from the active persona whenever the modal opens; a hardcoded prompt here would only drift. -->
-            <textarea id="settingSystem"></textarea>
+            <details class="advanced-params">
+                <summary>System prompt</summary>
+                <label for="settingSystem" class="visually-hidden">System Prompt</label>
+                <!-- Filled from the active persona whenever the modal opens; a hardcoded prompt here would only drift. -->
+                <textarea id="settingSystem"></textarea>
+            </details>
             <div class="modal-actions">
                 <button class="cancel-btn" id="settingsCancel">Cancel</button>
                 <button class="primary-btn" id="settingsSave">Save</button>
