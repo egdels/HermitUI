@@ -18,7 +18,7 @@ function userMsg(text, contextText, files = []) {
         return {
             role: "user",
             content: [
-                { type: "text", text: payloadText },
+                ...(payloadText ? [{ type: "text", text: payloadText }] : []),
                 ...imageFiles.map(f => ({ type: "image_url", image_url: { url: f.dataUrl } })),
             ],
         };

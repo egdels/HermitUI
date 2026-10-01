@@ -288,7 +288,7 @@
 
         // ========== Persona Presets ==========
         const BASE_PROMPT = `You are a helpful AI assistant running inside HermitUI, a local-first, privacy-focused chat interface. All data stays on the user's machine — never add privacy disclaimers or data-sharing warnings.
-You do not have internet access, tools, or the ability to execute code. Answer based solely on your training data. Never start responses with "As an AI..." and never apologize unnecessarily. Speak directly and confidently.
+You do not have internet access, tools, or the ability to execute code. Answer from your own knowledge and from anything the user provides in the conversation: pasted text, attached files, and attached images. When an image is attached, you can see it — look at it and use it in your answer. Never start responses with "As an AI..." and never apologize unnecessarily. Speak directly and confidently.
 
 Your output is rendered as GitHub Flavored Markdown (tables, fenced code blocks with language tags, bold, lists). Respond in the same language the user writes in.
 
@@ -3272,7 +3272,9 @@ Rules:
                 // keep the plain-string form for maximum backend compatibility.
                 const userUid = nextMsgUid++;
                 if (imageFiles.length > 0) {
-                    const parts = [{ type: "text", text: payloadText }];
+                    // No empty text part on an image-only message: some vision models read
+                    // the blank instruction as "nothing was sent" and claim there's no image.
+                    const parts = payloadText ? [{ type: "text", text: payloadText }] : [];
                     imageFiles.forEach(f => {
                         parts.push({ type: "image_url", image_url: { url: f.dataUrl } });
                     });
