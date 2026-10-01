@@ -12,6 +12,7 @@ const {
     detectCloudProvider, isLocalEndpoint, describeRemoteEndpoint,
     isTextFile, isImageFile, modelSupportsVision,
     modelReportsVision, extractModelId, normalizeGgufUrl, detectTemplateFromArch,
+    IMAGE_NOTE, withImageNote,
     buildWllamaPrompt, apiRoot, parseReasoningTemplateSupport, buildReasoningParams,
     chatErrorHint,
 } = H;
@@ -190,6 +191,22 @@ section("6. vision model detection");
     check("model id read from .id", extractModelId({ id: "a" }) === "a");
     check("model id falls back to .name", extractModelId({ name: "b" }) === "b");
     check("plain string id passes through", extractModelId("c") === "c");
+
+    // The "you can see images" note rides on the system message only when images are sent.
+    const img = { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } };
+    const textOnly = [{ role: "system", content: "Be brief." }, { role: "user", content: "hi" }];
+    check("no images leaves messages untouched", withImageNote(textOnly) === textOnly);
+    const withImg = [{ role: "system", content: "Be brief." }, { role: "user", content: [img] }];
+    const noted = withImageNote(withImg);
+    check("image note appended to the system prompt",
+        noted[0].content === "Be brief.\n\n" + IMAGE_NOTE, noted[0].content);
+    check("image note does not mutate the input", withImg[0].content === "Be brief.");
+    check("user message passes through", noted[1] === withImg[1]);
+    check("empty system prompt becomes just the note",
+        withImageNote([{ role: "system", content: "" }, { role: "user", content: [img] }])[0].content === IMAGE_NOTE);
+    const noSys = withImageNote([{ role: "user", content: [img] }]);
+    check("missing system message gets one prepended",
+        noSys.length === 2 && noSys[0].role === "system" && noSys[0].content === IMAGE_NOTE);
 }
 
 // wllama model URLs: the three shapes people realistically paste, and the shapes that

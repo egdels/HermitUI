@@ -61,6 +61,8 @@ ${constBlock("CHAT_TEMPLATES")}
 ${fn("escapeHtml")}
 ${fn("unescapeHtml")}
 ${fn("contentToText")}
+${constDecl("IMAGE_NOTE")}
+${fn("withImageNote")}
 ${fn("parseChatExport")}
 ${fn("splitContextBlocks")}
 ${fn("parseThinkSegments")}
@@ -84,7 +86,7 @@ ${fn("detectTemplateFromArch")}
 ${fn("buildWllamaPrompt")}
 function exportMd(messages) { ${exportBody()} return md; }
 export {
-    SUMMARY_PREFIX, escapeHtml, unescapeHtml, contentToText, parseChatExport,
+    SUMMARY_PREFIX, escapeHtml, unescapeHtml, contentToText, IMAGE_NOTE, withImageNote, parseChatExport,
     splitContextBlocks, exportMd,
     parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint, apiRoot,
     parseReasoningTemplateSupport, buildReasoningParams,

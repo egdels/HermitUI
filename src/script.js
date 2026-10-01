@@ -288,7 +288,7 @@
 
         // ========== Persona Presets ==========
         const BASE_PROMPT = `You are a helpful AI assistant running inside HermitUI, a local-first, privacy-focused chat interface. All data stays on the user's machine — never add privacy disclaimers or data-sharing warnings.
-You do not have internet access, tools, or the ability to execute code. Answer from your own knowledge and from anything the user provides in the conversation: pasted text, attached files, and attached images. When an image is attached, you can see it — look at it and use it in your answer. Never start responses with "As an AI..." and never apologize unnecessarily. Speak directly and confidently.
+You do not have internet access, tools, or the ability to execute code. Answer from your own knowledge and from anything the user provides in the conversation: pasted text, attached files, and attached images. Never start responses with "As an AI..." and never apologize unnecessarily. Speak directly and confidently.
 
 Your output is rendered as GitHub Flavored Markdown (tables, fenced code blocks with language tags, bold, lists). Respond in the same language the user writes in.
 
@@ -1882,6 +1882,22 @@ Rules:
             return content == null ? "" : String(content);
         }
 
+        // Vision models often open with "I can't view images" or "I'm not allowed to",
+        // then look at the image anyway once the user pushes back — the generic "no tools"
+        // framing primes them to refuse. Added per request rather than to the personas so it
+        // also covers custom and imported system prompts, and only when images are actually
+        // sent, so a text-only model is never told it can see something it can't.
+        const IMAGE_NOTE = "The user has attached one or more images to this conversation. They are included in the messages as image inputs and you can see them directly. Look at them and answer about them: do not claim you cannot view, open, or process images, and do not refuse just because the input is an image. Analyzing images the user shares is an expected, permitted part of this chat.";
+        function withImageNote(msgs) {
+            const hasImages = msgs.some(m => Array.isArray(m.content) && m.content.some(p => p.type === "image_url"));
+            if (!hasImages) return msgs;
+            if (msgs.length > 0 && msgs[0].role === "system" && typeof msgs[0].content === "string") {
+                const sys = msgs[0].content.trim();
+                return [{ role: "system", content: sys ? `${sys}\n\n${IMAGE_NOTE}` : IMAGE_NOTE }, ...msgs.slice(1)];
+            }
+            return [{ role: "system", content: IMAGE_NOTE }, ...msgs];
+        }
+
         function extractModelId(m) {
             return (m && (m.id || m.name)) || m;
         }
@@ -3342,10 +3358,12 @@ Rules:
             // Prepare containers for reasoning and text
             responseContainer.innerHTML = `<div class="ai-response-body"></div>`;
 
+            // Strip internal bookkeeping (uid/isSummary) — servers only see role/content.
+            const apiMessages = messages.filter(m => !m.isSummary).map(({ role, content }) => ({ role, content }));
             const chatPayload = {
                 model: MODEL_NAME,
-                // Strip internal bookkeeping (uid/isSummary) — servers only see role/content.
-                messages: messages.filter(m => !m.isSummary).map(({ role, content }) => ({ role, content })),
+                // wllama flattens images away, so it must not be told it can see them.
+                messages: activeBackend() === "wllama" ? apiMessages : withImageNote(apiMessages),
                 temperature: TEMPERATURE,
                 stream: true,
                 stream_options: { include_usage: true }
