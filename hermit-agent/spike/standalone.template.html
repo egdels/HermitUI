@@ -182,6 +182,7 @@ async function bootWorker() {
   try {
     let t0 = performance.now();
     const inl = window.__PYODIDE_INLINE__;
+    if (!inl) throw new Error("No inlined Pyodide: this is the template. Run build_standalone.py and open build/pyodide-standalone.html.");
     const dec = new TextDecoder();
     core = {
       loaderJs: dec.decode(await gunzipToBytes(inl["pyodide.js"])),
@@ -231,7 +232,8 @@ async function bootWorker() {
     log("storage: " + JSON.stringify(R.storageWorker) + " " + JSON.stringify(R.storageEstimate));
     R.ok = true;
   } catch (e) {
-    R.ok = false; R.error = String(e.stack || e.message || e);
+    // Firefox's e.stack leaves out the message, so always lead with it.
+    R.ok = false; R.error = `${e.name}: ${e.message}\n${e.stack || ""}`;
     log("FAILED: " + R.error);
   }
   window.__RESULT__ = R;
