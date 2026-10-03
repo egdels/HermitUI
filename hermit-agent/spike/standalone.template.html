@@ -235,8 +235,9 @@ async function bootWorker() {
     log("storage: " + JSON.stringify(R.storageWorker) + " " + JSON.stringify(R.storageEstimate));
     R.ok = true;
   } catch (e) {
-    // Firefox's e.stack leaves out the message, so always lead with it.
-    R.ok = false; R.error = `${e.name}: ${e.message}\n${e.stack || ""}`;
+    // Chromium's e.stack starts with "Name: message"; Firefox's leaves it out.
+    const head = `${e.name}: ${e.message}`, stack = e.stack || "";
+    R.ok = false; R.error = stack.startsWith(head) ? stack : `${head}\n${stack}`;
     log("FAILED: " + R.error);
   }
   window.__RESULT__ = R;
