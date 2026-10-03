@@ -2920,7 +2920,8 @@ Rules:
 - Inspect files before you modify them.
 - Print short summaries, not whole files or huge data.
 - Don't delete or overwrite the user's files unless the task requires it.
-- Take one step at a time: you only see a step's output in the next turn.`;
+- Take one step at a time: you only see a step's output in the next turn.
+- Code blocks are executed, never saved. To create a file, write it from your code, e.g. pathlib.Path("reader.py").write_text(source). A "# reader.py" comment at the top of a block does not create a file.`;
     const extra = String(instructions || "").trim();
     return extra ? base + "\n\nAdditional instructions from the user:\n" + extra : base;
 }
@@ -3055,6 +3056,38 @@ function normalizeUploadPath(raw) {
 function makeFence(content) {
     const runs = String(content || "").match(/`{3,}/g) || [];
     return "`".repeat(Math.max(3, ...runs.map(r => r.length + 1)));
+}
+
+// File names a model is likely to mean as deliverables. Deliberately a fixed list: a
+// generic "name.ext" pattern would also match module paths like `os.path`.
+const FILE_EXTENSIONS = ["py", "csv", "tsv", "txt", "md", "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg", "xml", "html", "css", "js", "ts", "java", "c", "h", "cpp", "rs", "go", "sql", "sh", "log", "png", "jpg", "jpeg", "gif", "svg", "pdf", "xlsx", "parquet", "pkl", "ipynb", "zip"];
+
+// A code step that starts with a "# reader.py" comment, as if that saved it — but no
+// such file exists after the run. Models carry this habit over from chat UIs.
+function filenameCommentHint(code, paths) {
+    const first = String(code || "").split("\n").find(l => l.trim()) || "";
+    const m = first.match(/^\s*#\s*(?:file(?:name)?\s*:\s*)?(\S+\.([A-Za-z0-9]+))\s*$/i);
+    if (!m || !FILE_EXTENSIONS.includes(m[2].toLowerCase())) return "";
+    const name = m[1].replace(/^\/?workspace\//, "");
+    const have = new Set(paths || []);
+    if (have.has(name) || [...have].some(p => p.split("/").pop() === name)) return "";
+    return `Your code starts with "# ${m[1]}", but running a code block doesn't save it: there is no ${name} in /workspace. If you meant to create that file, write it from your code.`;
+}
+
+// Files a final answer presents (in backticks or bold) that aren't in the workspace.
+function missingMentionedFiles(answer, paths) {
+    const have = new Set(paths || []);
+    const base = new Set([...have].map(p => p.split("/").pop()));
+    const out = [];
+    for (const m of String(answer || "").matchAll(/(?:`([^`\s]+)`|\*\*([^*\s]+)\*\*)/g)) {
+        // "**`name.py`**" matches as bold with the backticks still inside.
+        const raw = (m[1] || m[2]).replace(/`/g, "").replace(/^\/?workspace\//, "").replace(/[.,:;)]+$/, "");
+        const ext = (raw.match(/\.([A-Za-z0-9]+)$/) || [])[1];
+        if (!ext || !FILE_EXTENSIONS.includes(ext.toLowerCase()) || /[()=<>]/.test(raw)) continue;
+        if (have.has(raw) || base.has(raw) || out.includes(raw)) continue;
+        out.push(raw);
+    }
+    return out;
 }
 
 // ========== 4. Zip + session archive (pure) ==========
@@ -4013,6 +4046,22 @@ async function agentTurn() {
     S.stepCount = n;
 
     if (parsed.kind === "final") {
+        // An answer that presents files the workspace doesn't have goes back to the
+        // model once, instead of ending the task on a false claim. Only once in a
+        // row: the second answer stands either way.
+        const missing = missingMentionedFiles(split.text, [...WS.files.keys()]);
+        const prev = S.timeline.slice(0, idx).reverse().find(t => t.type === "step");
+        if (missing.length && !(prev && prev.status === "unverified")) {
+            step.status = "unverified";
+            step.phase = "done";
+            step.endedAt = nowIso();
+            const list = missing.join(", ");
+            step.notes = [`The answer mentions ${list}, which ${missing.length === 1 ? "isn't" : "aren't"} in the workspace. The agent was asked to check.`];
+            S.messages.push({ role: "user", content: buildObservation({ step: n, status: "error", notes: [`Your answer mentions ${list}, but /workspace has no such file${missing.length === 1 ? "" : "s"}. Files that exist: ${[...WS.files.keys()].join(", ") || "(none)"}. Create the missing file${missing.length === 1 ? "" : "s"} with code, or correct your answer.`] }) });
+            step.checkpoint = takeCheckpoint("step " + n);
+            renderTimelineItem(idx);
+            return "continue";
+        }
         step.phase = "done";
         step.endedAt = nowIso();
         step.checkpoint = takeCheckpoint("step " + n);
@@ -4115,6 +4164,8 @@ async function executeStep(step, idx, notes) {
         const risk = classifyEffect(effect.diff, origins, { bytesWritten: effect.bytesWritten, netAttempts: step.netAttempts, overLimit: effect.overLimit });
         step.risk = risk;
         if (step.netAttempts.length) step.notes.push("Network access is blocked; these attempts failed: " + step.netAttempts.join(", "));
+        const fileHint = filenameCommentHint(code, Object.keys(r.listing));
+        if (fileHint) step.notes.push(fileHint);
 
         let decision = { action: "approve" };
         if (autonomy === "risk" && risk.verdict === "ask" && !allowNetwork) {
@@ -4309,7 +4360,7 @@ function button(label, action, idx, cls, title) {
 }
 
 const VERDICT_LABELS = { auto: "✅ auto-committed", approved: "👍 approved", edited: "✏️ edited & approved", rejected: "↩️ rejected", "rolled back": "↩️ rolled back", "approved (network)": "🌐 approved with network" };
-const STATUS_LABELS = { ok: "ok", error: "error", timeout: "⏱ timeout", killed: "☠️ killed", crashed: "💥 crashed", rejected: "rejected", cutoff: "✂️ cut off", empty: "empty reply", broken: "unclosed code", interrupted: "interrupted" };
+const STATUS_LABELS = { unverified: "⚠️ files missing", ok: "ok", error: "error", timeout: "⏱ timeout", killed: "☠️ killed", crashed: "💥 crashed", rejected: "rejected", cutoff: "✂️ cut off", empty: "empty reply", broken: "unclosed code", interrupted: "interrupted" };
 
 function renderThink(item, card, streaming) {
     if (!item.reasoning) return;
@@ -4344,7 +4395,7 @@ function renderFileChips(changes, idx) {
 function buildStepCard(item, idx, old) {
     const card = el("article", "card step-card phase-" + (item.phase || "done"));
     const head = el("div", "card-head");
-    head.appendChild(el("span", "card-title", item.kind === "final" ? "✅ Final answer" : item.kind === "ask" ? "❓ Question" : `Step ${item.n}`));
+    head.appendChild(el("span", "card-title", item.kind === "final" ? (item.status === "unverified" ? "↩️ Answer sent back" : "✅ Final answer") : item.kind === "ask" ? "❓ Question" : `Step ${item.n}`));
     if (item.status && STATUS_LABELS[item.status]) head.appendChild(el("span", "badge status-" + item.status, STATUS_LABELS[item.status]));
     if (item.decision) head.appendChild(el("span", "badge verdict-" + item.decision.replace(/\W+/g, "-"), (VERDICT_LABELS[item.decision] || item.decision) + (item.decidedBy === "user" && item.decision !== "auto" ? " by you" : "")));
     if (item.phase === "thinking") head.appendChild(el("span", "badge live", "streaming…"));
@@ -4359,7 +4410,11 @@ function buildStepCard(item, idx, old) {
         if (item.content) card.appendChild(renderMarkdown(item.content));
         return card;
     }
-    if (item.kind === "final") { card.appendChild(renderMarkdown(item.content)); return finishCard(card, item, idx); }
+    if (item.kind === "final") {
+        card.appendChild(renderMarkdown(item.content));
+        if ((item.notes || []).length) card.appendChild(el("p", "hint", "⚠️ " + item.notes.join(" ")));
+        return finishCard(card, item, idx);
+    }
     if (item.kind === "ask") {
         if (item.prose) card.appendChild(renderMarkdown(item.prose));
         card.appendChild(renderMarkdown("**" + (item.question || "") + "**"));

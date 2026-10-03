@@ -124,6 +124,12 @@ print(len(rows), total)
             {"reasoning": "".join(f"Thought {i}: weighing the options carefully. " for i in range(120)),
              "content": "Streamed answer. " * 30, "delay": 0.02},
         ],
+        "E2E-PHANTOM": [
+            py("# reader.py\nimport csv\nprint('read')"),
+            final("Created **`reader.py`** for you."),
+            py('import pathlib\npathlib.Path("reader.py").write_text("import csv\\n")\nprint("saved")'),
+            final("Created `reader.py`."),
+        ],
         "E2E-AUTO": [
             py('import os\nos.remove("data.csv")\nprint("gone")'),
             final("Removed it."),
@@ -400,6 +406,22 @@ def streaming_scenario(browser, port, state):
     page.context.close()
 
 
+def phantom_scenario(browser, port, state):
+    print("— phantom files: a '# name.py' step and an answer naming a file that doesn't exist")
+    page = open_app(browser)
+    configure(page, port, 10)
+    page.fill("#taskInput", "E2E-PHANTOM: make a csv reader")
+    page.click("#sendBtn")
+    wait_until(page, "() => S.status === 'done'", 60, "final")
+    st = steps(page)
+    check("answer naming a missing file is sent back once", [s["status"] for s in st] == ["ok", "unverified", "ok", None], [s["status"] for s in st])
+    m = [r["messages"][-1]["content"] for r in state.requests if "E2E-PHANTOM" in r["messages"][1]["content"]]
+    check("model told that the comment didn't save the file", "doesn't save it" in m[1] and "no reader.py" in m[1], m[1])
+    check("model told which files are missing", "mentions reader.py" in m[2] and "Files that exist: (none)" in m[2], m[2])
+    check("the file exists in the end", [p for p, h, o in workspace(page)] == ["reader.py"])
+    page.context.close()
+
+
 def autopilot_scenario(browser, port, state):
     print("— autopilot: even a delete of a user file commits without a hold")
     page = open_app(browser)
@@ -435,6 +457,7 @@ def main():
                 approve_scenario(browser, port, state)
                 autopilot_scenario(browser, port, state)
                 streaming_scenario(browser, port, state)
+                phantom_scenario(browser, port, state)
             except AssertionError as e:
                 check(f"{name}: scenario completed", False, str(e))
             finally:

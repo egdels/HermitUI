@@ -58,6 +58,14 @@ look.
 - **`ask:` is detected at the start of any line**, case-insensitive, with or without
   bold. A final answer that contains a line starting with "Ask:" would pause the
   loop. That's unlikely but possible.
+- **A final answer that names files the workspace doesn't have is sent back once.**
+  This applies to names in backticks or bold with a common file extension. The
+  model is told which files are missing and which exist; its second answer stands
+  either way. A step whose code starts with a `# name.py` comment also gets a note
+  when no such file exists afterwards. Why: a real model "saved" `csv_reader.py`
+  that way, then claimed in its final answer to have created it. False positive: an
+  answer that mentions a file the agent deliberately deleted, in backticks, gets
+  sent back once.
 - **A follow-up after the final answer continues the same conversation**, and the
   step budget is extended by the step limit. To start fresh, use ➕ New.
 

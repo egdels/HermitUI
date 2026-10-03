@@ -141,7 +141,27 @@ section("11. Prompts");
     check("task message with an empty workspace", X.buildTaskMessage("x", []).endsWith("(empty)"));
 }
 
-section("12. sha256 — WebCrypto and the JS fallback agree");
+section("12. Phantom files — code that 'saves' via a comment, answers naming missing files");
+{
+    const code = "# csv_reader.py\nimport csv\nprint(1)\n";
+    check("filename comment with no such file → hint", /# csv_reader\.py.*no csv_reader\.py in \/workspace/.test(X.filenameCommentHint(code, ["sample.csv"])));
+    check("…no hint when the file exists", X.filenameCommentHint(code, ["sample.csv", "csv_reader.py"]) === "");
+    check("…or exists in a subfolder", X.filenameCommentHint(code, ["src/csv_reader.py"]) === "");
+    check("'# filename: x.py' form", X.filenameCommentHint("# filename: x.py\nprint(1)", []) !== "");
+    check("/workspace/ prefix", X.filenameCommentHint("# /workspace/x.py\nprint(1)", ["x.py"]) === "");
+    check("ordinary comment → no hint", X.filenameCommentHint("# read the data first\nprint(1)", []) === "");
+    check("only the first line counts", X.filenameCommentHint("print(1)\n# x.py", []) === "");
+    check("module-ish names aren't files", X.filenameCommentHint("# os.path\nprint(1)", []) === "");
+
+    const answer = "I created two files in `/workspace`:\n1. **`sample.csv`** — data\n2. **`csv_reader.py`** — the reader, using `csv.DictReader` and `os.path`.";
+    check("answer names a missing file", JSON.stringify(X.missingMentionedFiles(answer, ["sample.csv"])) === '["csv_reader.py"]', JSON.stringify(X.missingMentionedFiles(answer, ["sample.csv"])));
+    check("nothing missing when both exist", X.missingMentionedFiles(answer, ["sample.csv", "csv_reader.py"]).length === 0);
+    check("bold names count too", JSON.stringify(X.missingMentionedFiles("Saved **report.md**.", [])) === '["report.md"]');
+    check("/workspace/ prefix and trailing punctuation", X.missingMentionedFiles("See `/workspace/out/plot.png`.", ["out/plot.png"]).length === 0);
+    check("calls and plain prose ignored", X.missingMentionedFiles("Use `pd.read_csv()` on data.csv", []).length === 0);
+}
+
+section("13. sha256 — WebCrypto and the JS fallback agree");
 {
     const enc = new TextEncoder();
     check("known vector 'abc'", (await X.sha256Hex(enc.encode("abc"))) === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
