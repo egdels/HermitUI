@@ -216,4 +216,60 @@ section("14. Step stats — server figures first, our clock as the fallback");
     check("cleanStepStats drops an unknown speed source", X.cleanStepStats({ tpsSource: "magic" }).tpsSource === "");
 }
 
+section("15. Context compaction (DESIGN §5.4)");
+{
+    const sys = { role: "system", content: "sys" };
+    const task = { role: "user", content: "Task: sum data.csv\n\nFiles in /workspace: data.csv (20 B)" };
+    // n steps: assistant reply + observation each.
+    const hist = (n) => [sys, task, ...Array.from({ length: n }, (_, i) => [
+        { role: "assistant", content: `step ${i + 1} code` },
+        { role: "user", content: `<observation step="${i + 1}" status="ok">\nout ${i + 1}\n</observation>` },
+    ]).flat()];
+    const alternates = (ms) => ms[0].role === "system" && ms.slice(1).every((m, i) => m.role === (i % 2 ? "assistant" : "user"));
+
+    check("estimate: chars / 3.5 without a measurement", X.estimateTokens([{ content: "x".repeat(35) }], 0) === 10);
+    check("estimate: measured ratio wins", X.estimateTokens([{ content: "x".repeat(100) }, { content: "y".repeat(100) }], 0.5) === 100);
+    check("context size: the setting wins", X.contextLimit(8000, 16384) === 8000);
+    check("context size: else the server's n_ctx", X.contextLimit(0, 16384) === 16384);
+    check("context size: unknown is 0", X.contextLimit(0, 0) === 0 && X.contextLimit(NaN, undefined) === 0);
+    check("due at the threshold", X.compactionDue(7500, 10000, 75) && !X.compactionDue(7499, 10000, 75));
+    check("never due when off or the size is unknown", !X.compactionDue(99999, 10000, 0) && !X.compactionDue(99999, 0, 75));
+
+    check("nothing to compact with only the kept steps", X.planCompaction(hist(5), 4, 2) === null);
+    let plan = X.planCompaction(hist(6), 4, 2);
+    check("6 steps, keep 4: steps 1–2 summarised, cut at step 3's reply", plan && plan.steps === 2 && plan.cut === 6, JSON.stringify(plan));
+    check("forced: keep fewer to find something", X.planCompaction(hist(2), 1, 1).steps === 1);
+    check("a tail of at least one step is always kept", X.planCompaction(hist(3), 0, 1).steps === 2);
+
+    const h = hist(6);
+    h[h.length - 1].content += "\n\nNote: guidance from the user";
+    const req = X.buildCompactionRequest(h, plan.cut);
+    check("summariser request: system + one user message", req.length === 2 && req[0].role === "system" && req[1].role === "user");
+    check("…holds the task and the summarised steps only", req[1].content.includes("Task: sum data.csv") && req[1].content.includes("step 2 code") && !req[1].content.includes("step 3 code"));
+    const huge = hist(3); huge[3].content = "A".repeat(50000);
+    check("…with long observations clipped", X.buildCompactionRequest(huge, 6)[1].content.length < 10000);
+
+    const out = X.buildCompactedMessages(h, plan.cut, "## Task\nsum it", 2, [{ path: "data.csv", size: 20 }, { path: "out.txt", size: 3 }]);
+    check("compacted: system, task + summary, kept tail", out.length === 2 + 8 && out[0].content === "sys" && out[2].content === "step 3 code");
+    check("roles still alternate", alternates(out), out.map(m => m.role).join(","));
+    check("summary block names its steps", out[1].content.startsWith("Task: sum data.csv") && out[1].content.includes('<history_summary steps="1-2">') && out[1].content.includes("## Task\nsum it"));
+    check("current file list re-sent", out[1].content.includes("Files in /workspace now: data.csv (20 B), out.txt (3 B)"));
+    check("the latest note is kept", out[out.length - 1].content.endsWith("guidance from the user"));
+    check("tail is copied, not shared", out[2] !== h[plan.cut]);
+
+    // A second compaction folds the first summary in and replaces it.
+    const again = [...out, ...hist(4).slice(2).map(m => ({ ...m, content: m.content + " later" }))];
+    const p2 = X.planCompaction(again, 4, 2);
+    const req2 = X.buildCompactionRequest(again, p2.cut);
+    check("second pass sends the earlier summary along", req2[1].content.includes("EARLIER SUMMARY:") && req2[1].content.includes("sum it"));
+    const out2 = X.buildCompactedMessages(again, p2.cut, "newer", 2 + p2.steps, []);
+    check("…and the task message holds one summary", out2[1].content.split("<history_summary").length === 2 && out2[1].content.includes(`steps="1-${2 + p2.steps}"`) && alternates(out2));
+    check("task message base strips the summary", X.taskMessageBase(out2[1].content) === task.content);
+
+    check("overflow: llama.cpp", X.isContextOverflowError("Server Error 400: the request exceeds the available context size, try increasing it"));
+    check("overflow: OpenAI", X.isContextOverflowError("Server Error 400: This model's maximum context length is 8192 tokens"));
+    check("overflow: not a 401", !X.isContextOverflowError("Server Error 401: invalid api key"));
+    check("the error hint still recognises it", X.chatErrorHint("Server Error 400: exceeds the available context size", {}).includes("context"));
+}
+
 report();

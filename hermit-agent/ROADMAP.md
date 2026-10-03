@@ -200,7 +200,12 @@ Decisions taken without the owner are in [REVIEW_NOTES.md](REVIEW_NOTES.md).
 - [ ] Per-file text diffs (line diff), image previews, a binary summary.
 - [ ] matplotlib capture (Agg plus a patched `show()`) with inline figures (§8).
 - [ ] Package-loading UX: import detection, timeline notes, an offline error.
-- [ ] Context management: elision, summarisation, periodic file listing (§5.4).
+- [x] **Auto-compaction** (§5.4): older steps are summarised at a configurable share
+      of the context (default 75 %), and once more on a context-overflow error. Rewind and
+      export work across compactions. Covered by `tests/agent.test.mjs`,
+      `tests/archive.test.mjs` and the e2e `compaction_scenario`.
+- [ ] Context management, the rest: elision of old observations, a periodic file listing
+      (§5.4).
 - [ ] Inject guidance mid-task. Edit-before-run polish.
 - [ ] Mobile layout: the workspace drawer, touch-friendly approvals.
 - [ ] Chat error hints adapted for agent failures (endpoint down mid-task, context

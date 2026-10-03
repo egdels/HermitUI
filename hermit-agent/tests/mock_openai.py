@@ -4,11 +4,22 @@ Replies are picked by a keyword in the task (the first user message) and by how 
 assistant messages the request already holds, so a test is a list of model turns.
 Every request is recorded, and so is every hit on /exfil/…, which the network-guard
 probes in the e2e test aim at: a non-empty `exfil` list means something got out.
+
+History compaction: the summariser's request (recognised by its system prompt) gets
+SUMMARY back, and a compacted history's `<history_summary steps="1-K">` adds K to the
+turn count, since those K assistant messages are gone. A reply marked
+`overflow_unless_compacted` answers a 400 context-size error until the history has
+been compacted.
 """
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+SUMMARY = "## Task\nMock task.\n## Done so far\nMOCK-SUMMARY of the earlier steps."
+SUMMARISER_MARK = "You compress the history of an AI agent's session"
 
 
 class MockState:
@@ -75,11 +86,17 @@ def make_handler(state):
                 state.requests.append(body)
             msgs = body.get("messages", [])
             first_user = next((m["content"] for m in msgs if m["role"] == "user"), "")
-            turn = sum(1 for m in msgs if m["role"] == "assistant")
-            script = next((v for k, v in state.scripts.items() if k in first_user), None)
-            if script is None or turn >= len(script):
-                return self.send_json(500, {"error": {"message": f"mock has no reply for turn {turn}"}})
-            reply = script[turn]
+            if msgs and SUMMARISER_MARK in msgs[0]["content"]:
+                reply = {"content": SUMMARY}
+            else:
+                compacted = re.search(r'<history_summary steps="1-(\d+)">', first_user)
+                turn = sum(1 for m in msgs if m["role"] == "assistant") + (int(compacted.group(1)) if compacted else 0)
+                script = next((v for k, v in state.scripts.items() if k in first_user), None)
+                if script is None or turn >= len(script):
+                    return self.send_json(500, {"error": {"message": f"mock has no reply for turn {turn}"}})
+                reply = script[turn]
+                if reply.get("overflow_unless_compacted") and not compacted:
+                    return self.send_json(400, {"error": {"message": "the request exceeds the available context size, try increasing it"}})
             self.send_response(200)
             self.cors()
             self.send_header("Content-Type", "text/event-stream")

@@ -171,4 +171,49 @@ section("5. validateSession");
     check("a step without stats imports with none", w.timeline[1].stats === null);
 }
 
+section("6. Compactions survive export and keep rewind possible");
+{
+    const bytes = enc.encode("a,b\n");
+    const h = await X.sha256Hex(bytes);
+    const full = [{ role: "system", content: "sys" }, { role: "user", content: "Task: x" }, { role: "assistant", content: "s1" }, { role: "user", content: "o1" }, { role: "assistant", content: "s2" }, { role: "user", content: "o2" }];
+    const session = {
+        task: "x", createdAt: "t", status: "paused",
+        messages: [{ role: "system", content: "sys" }, { role: "user", content: 'Task: x\n\n<history_summary steps="1-1">…</history_summary>' }, { role: "assistant", content: "s2" }, { role: "user", content: "o2" }],
+        compactions: [{ before: full, fromStep: 1, toStep: 1 }],
+        timeline: [{ type: "task", text: "x", checkpoint: 0 }, { type: "compaction", reason: "threshold", fromStep: 1, toStep: 1, summary: "## Task\nx", tokensBefore: 900, tokensAfter: 300 }],
+        stepCount: 2, settings: { autoCompactPct: 60, contextSize: 8192 },
+    };
+    const files = new Map([["a.csv", { hash: h, origin: "user" }]]);
+    const checkpoints = [
+        { timelineLength: 1, msgCount: 4, stepCount: 1, epoch: 0, label: "step 1", files: { "a.csv": { hash: h, origin: "user" } } },
+        { timelineLength: 2, msgCount: 4, stepCount: 2, epoch: 1, label: "step 2", files: { "a.csv": { hash: h, origin: "user" } } },
+    ];
+    const es = X.buildSessionArchive({ session, files, blobs: new Map([[h, bytes]]), checkpoints }, { includeCheckpoints: true });
+    const back = await X.parseSessionArchive(await X.zipRead(await X.zipWrite(es)));
+    check("compactions round-trip", JSON.stringify(back.session.compactions) === JSON.stringify(session.compactions));
+    check("checkpoint epochs round-trip", back.checkpoints[0].epoch === 0 && back.checkpoints[1].epoch === 1);
+    check("compaction card round-trips", back.session.timeline[1].type === "compaction" && back.session.timeline[1].summary === "## Task\nx");
+    check("compaction settings round-trip", back.session.settings.autoCompactPct === 60 && back.session.settings.contextSize === 8192);
+    check("transcript notes the compaction", dec.decode(es.find(e => e.path === "transcript.md").data).includes("History compacted — steps 1–1"));
+
+    const tamperCp = async (mutate) => {
+        const copy = es.map(e => ({ ...e }));
+        const i = copy.findIndex(e => e.path === "checkpoints/index.json");
+        const cps = JSON.parse(dec.decode(copy[i].data)); mutate(cps); copy[i].data = enc.encode(JSON.stringify(cps));
+        return X.parseSessionArchive(await X.zipRead(await X.zipWrite(copy)));
+    };
+    await rejects("epoch beyond the compactions", tamperCp(cps => { cps[0].epoch = 5; }), "epoch");
+    await rejects("msgCount checked against that epoch's history", tamperCp(cps => { cps[0].msgCount = 7; }), "past the end");
+    const old = await tamperCp(cps => { delete cps[0].epoch; delete cps[1].epoch; });
+    check("an export without epochs counts as the latest epoch", old.checkpoints[0].epoch === 1);
+
+    const bad = (name, v, frag) => { try { X.validateSession(v); check(name, false, "accepted"); } catch (e) { check(name, e.message.includes(frag), e.message); } };
+    bad("compactions not a list", { task: "t", messages: [], timeline: [], compactions: {} }, "'compactions'");
+    bad("compaction with a bad message", { task: "t", messages: [], timeline: [], compactions: [{ before: [{ role: "tool", content: "x" }], fromStep: 1, toStep: 1 }] }, "compaction 0 message 0");
+    bad("compaction with bad steps", { task: "t", messages: [], timeline: [], compactions: [{ before: [], fromStep: 3, toStep: 1 }] }, "compaction 0");
+    const v = X.validateSession({ task: "t", messages: [], timeline: [] });
+    check("older sessions: no compactions, defaults", v.compactions.length === 0 && v.settings.autoCompactPct === 75 && v.settings.contextSize === 0);
+    check("compaction threshold clamped", X.validateSession({ task: "t", messages: [], timeline: [], settings: { autoCompactPct: 500 } }).settings.autoCompactPct === 95);
+}
+
 report();

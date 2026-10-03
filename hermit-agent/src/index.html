@@ -149,6 +149,14 @@
                     <label for="settingMaxTokens">Max tokens / reply</label>
                     <input type="number" id="settingMaxTokens" min="0" title="0 = don't send a limit">
                 </div>
+                <div>
+                    <label for="settingAutoCompact">Auto-compact at (%)</label>
+                    <input type="number" id="settingAutoCompact" min="0" max="95" title="When the history reaches this share of the context, older steps are summarised and the last 4 kept in full. 0 = off. Also compacts once when the server rejects a prompt as too long.">
+                </div>
+                <div>
+                    <label for="settingContextSize">Context size (tokens)</label>
+                    <input type="number" id="settingContextSize" min="0" title="0 = use the size the server reports (llama.cpp /props). Set it for servers that don't report one, such as Ollama or cloud APIs.">
+                </div>
             </div>
             <div class="modal-actions">
                 <button type="button" class="cancel-btn" id="settingCancel">Cancel</button>

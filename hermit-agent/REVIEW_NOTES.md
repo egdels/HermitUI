@@ -126,6 +126,24 @@ look.
 - **Rejected steps' file versions stay in memory while their card exists**, so the
   file chips can still show them. They're never exported.
 
+## Context compaction (DESIGN §5.4, added after the MVP)
+
+- **Default 75 %, keep the last 4 steps, at least 2 steps per compaction.** At 75 % of
+  a 16 k context, the agent still has ~4 k for a reply. Lower the threshold if
+  `max_tokens` is large compared with the context.
+- **The token estimate is calibrated, not counted.** No tokenizer runs in the page. The
+  previous request's `prompt_tokens` per character is used, which also covers the chat
+  template's overhead. After an import, chars ÷ 3.5 is used until the first request.
+- **Ollama and cloud APIs don't report a context size.** Without the *Context size*
+  setting, only the overflow fallback works there. Ollama truncates silently instead of
+  failing, so set the size by hand for it.
+- **The summary is written by the same model, with the user's reasoning effort and
+  `max_tokens`.** A summary cut off at `max_tokens` is still used. Only an empty one is
+  rejected.
+- **Exports carry every compaction's full pre-compaction history**, so they grow by
+  roughly one context's worth per compaction. That is the price of rewind
+  across a compaction.
+
 ## Export / import (DESIGN §3)
 
 - **`session.json` stores a `timeline`** (every card in order) instead of a bare
@@ -172,5 +190,6 @@ look.
 - Drag-drop and folder upload: wired, but only folder-less file upload is in e2e.
 - Safari, mobile browsers, and real desktop Chrome/Edge/Firefox on Windows. The
   spike page ran in desktop Chrome on Windows; the app itself hasn't.
-- Long tasks: there's no context management yet (Phase 2). When the history
-  overflows, the error hint suggests rewinding.
+- Long tasks against a real model: compaction is tested end-to-end only against the
+  mock endpoint. How good the summaries are, and whether an agent continues well from
+  them, hasn't been measured yet.

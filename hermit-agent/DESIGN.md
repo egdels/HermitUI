@@ -195,7 +195,10 @@ hermit-agent-session-2026-10-03-14-30.zip
   and the old/new pairs of an edit. Written content isn't repeated: it is in the
   workspace and checkpoint blobs, which the step's file chips point to;
 - file origins (`user`/`agent`) for the current workspace;
-- autonomy level, step limit, timeout, max tokens, reasoning effort;
+- autonomy level, step limit, timeout, max tokens, reasoning effort, auto-compaction
+  threshold and context size;
+- `compactions`: the full history each compaction replaced (§5.4), so rewind still
+  works after an import. Checkpoints record their `epoch`;
 - non-secret connection settings: base URL and model name. **The API key is never
   exported.**
 
@@ -401,6 +404,30 @@ The user's custom instructions are appended after it, like HermitUI personas.
   has a summarise flow (`summarizeBtn`) to adapt.
 - The current file listing is re-sent in compact form every few steps so the model
   doesn't rely on stale memory of the workspace.
+
+*As built (auto-compaction; elision and the periodic listing are still open):*
+- **Setting:** *Auto-compact at (%)*, default 75, 0 = off, and *Context size*, default
+  0 = the server's `n_ctx` from llama.cpp's `/props`. Both are exported with the session.
+- **Trigger:** before each request, the prompt is estimated as characters times the
+  tokens per character the previous request measured (`prompt_tokens` / characters
+  sent, or 1/3.5 before the first). It compacts at the threshold if at least 2 steps lie
+  outside the kept tail, so it can't fire every turn. With no known context size,
+  only the fallback applies: a context-overflow error compacts once, as far as needed
+  (down to keeping one step), and retries the request.
+- **Mechanism:** one extra request to the same endpoint, with a fixed summariser prompt.
+  The headings are Task, Done so far, Files, Interpreter state, Errors and dead ends, and
+  Next. Observations in it are clipped to 1.5 + 1.5 KB. The history becomes the system
+  prompt, then the task message with `<history_summary steps="1-K">…</history_summary>`
+  and the current file list appended, then the last 4 steps verbatim. The kept tail
+  starts at an assistant message, so roles still alternate. A later compaction
+  folds the earlier summary in. A failed or empty summary leaves the history unchanged,
+  with a warning, and the threshold trigger then waits 2 steps.
+- **Timeline:** a 🗜️ card shows the step range, the token estimate before and after, and
+  the summary (sanitized Markdown). The status bar shows "compacting history…". Stop
+  aborts it.
+- **Rewind:** `session.compactions[i].before` keeps the full history each compaction
+  replaced, and a checkpoint records its `epoch` (the number of compactions so far).
+  Rewinding to an earlier epoch restores that history first, then truncates it as usual.
 
 ### 5.5 Later: native tool calls
 When the endpoint supports OpenAI `tools`, offer `run_python(code)`,

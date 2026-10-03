@@ -28,6 +28,10 @@ the `FUNCS` list with the rename. Only DOM-free code can be covered this way.
   - The prompts, and that the JS sha256 fallback matches WebCrypto.
   - The per-step model stats: `buildStepStats` (server `timings` over the page
     clock, token fallbacks, garbage input), `formatStepStats`, `cleanStepStats`.
+  - Context compaction: the token estimate, context size and threshold, the cut
+    point (kept tail, minimum steps, forced), the summariser request (clipped, with the
+    earlier summary), the compacted history (roles alternate, one summary block, the
+    file list), and the overflow-error matcher.
 - **`archive.test.mjs`** covers:
   - CRC32, and the zip round-trip (binary, unicode names, empty files).
   - The untrusted-input rules: traversal, absolute and backslash paths, CRC
@@ -38,6 +42,8 @@ the `FUNCS` list with the rename. Only DOM-free code can be covered this way.
   - Tampering: a wrong checkpoint blob, missing content, an index pointing past the
     session, a missing manifest, a newer format version, broken JSON.
   - `validateSession` coercion and defaults.
+  - Compactions and checkpoint epochs: round-trip, tampering, and older exports
+    without them.
 - **`files.test.mjs`** covers the file actions (DESIGN §5.1):
   - `extractFileActions`: both quote styles, fences inside written content,
     line-start only, unclosed tags, path normalising and unsafe paths.
@@ -86,6 +92,16 @@ main scenarios:
      interpreter keeps its variables.
    - A mixed reply runs nothing.
    - Export → import rebuilds the action rows.
+6. **Auto-compaction** with a tiny context size:
+   - Two compactions (steps 1–2, then 3–4) and nothing earlier.
+   - The next request carries the summary and the last 4 steps verbatim, with roles
+     alternating.
+   - The second pass folds in the first summary.
+   - Rewinding to before a compaction restores the full history.
+   - A context-overflow error (the mock's 400) compacts and retries without leaving
+     an error card.
+   The mock answers the summariser's request with a fixed summary, and counts the
+   compacted steps toward its turn index.
 
 Stock Firefox (`firefox=<binary>`, driven over WebDriver BiDi) runs everything except
 the download-based checks, which Playwright can't capture over BiDi. It matters

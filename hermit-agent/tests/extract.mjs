@@ -40,6 +40,8 @@ const FUNCS = [
     "isSafeRelPath", "normalizeUploadPath", "makeFence", "filenameCommentHint", "missingMentionedFiles",
     "normalizeActionPath", "parseTagAttrs", "extractFileActions", "decodeTextFile", "countOccurrences", "applyFileActions", "formatFileResults",
     "buildStepStats", "cleanStepStats", "formatStepStats",
+    "formatFileList", "isContextOverflowError", "messageChars", "estimateTokens", "contextLimit", "compactionDue",
+    "planCompaction", "taskMessageBase", "buildCompactionRequest", "buildCompactedMessages",
     "crc32", "streamThrough", "sha256Hex", "sha256HexJs", "zipWrite", "zipRead", "cleanForExport",
     "transcriptMarkdown", "buildSessionArchive", "validateManifest", "validateSession", "parseSessionArchive",
 ];

@@ -68,7 +68,7 @@ See [tests/README.md](tests/README.md). The page's CSP blocks `eval`, so Playwri
 |---|---|---|---|
 | `escapeHtml`, `gunzipToBytes`, `createThrottle`, `parseThinkSegments` | `script.js` | `28483fc` | unchanged |
 | `apiEndpoint`, `normalizeApiUrl`, `apiRoot`, `CLOUD_PROVIDERS`, `detectCloudProvider`, `isLocalEndpoint`, `describeRemoteEndpoint`, `isBlockedMixedContent` | `script.js` | `28483fc` | unchanged (example URL in the error text says :8080) |
-| `chatErrorHint` | `script.js` | `28483fc` | wllama branch dropped; context-overflow advice says "rewind" |
+| `chatErrorHint` | `script.js` | `28483fc` | wllama branch dropped; context-overflow advice says "rewind"; its overflow regex moved into `isContextOverflowError` (shared with auto-compaction) |
 | `parseReasoningTemplateSupport`, `REASONING_PARAM_KEYS`, `looksLikeReasoningRejection` | `script.js` | `28483fc` | unchanged |
 | `buildReasoningParams` | `script.js` | `28483fc` | remote backend only (no wllama kwargs path) |
 | `probeReasoningSupport` | `script.js` | `28483fc` | returns levels plus llama.cpp's `n_ctx` (for the step stats); runs automatically before the first request |

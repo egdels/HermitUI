@@ -20,7 +20,7 @@ from playwright.sync_api import sync_playwright
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from mock_openai import serve  # noqa: E402
+from mock_openai import SUMMARISER_MARK, serve  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 APP_URL = (ROOT / "dist" / "hermit-agent-standalone.html").as_uri()
@@ -144,6 +144,8 @@ print(len(rows), total)
             final('<write_file path="x.py">\nx = 1\n</write_file>\n```python\nimport x\n```'),
             final("Done: **hello.py** greets."),
         ],
+        "E2E-COMPACT": [py(f"print('out {i}')") for i in range(1, 9)] + [final("Compacted and done.")],
+        "E2E-OVERFLOW": [py(f"print('out {i}')") for i in range(1, 4)] + [dict(final("Fits now."), overflow_unless_compacted=True)],
         "E2E-APPROVE": [
             py('print("original")'),
             py("while True:\n    pass"),
@@ -532,6 +534,53 @@ def autopilot_scenario(browser, port, state):
     page.context.close()
 
 
+def compaction_scenario(browser, port, state):
+    print("— auto-compaction: threshold, a second pass, rewind across it, overflow retry")
+    page = open_app(browser)
+    configure(page, port, 10)
+    page.click("#settingsBtn")
+    page.fill("#settingAutoCompact", "75")
+    page.fill("#settingContextSize", "100")   # the mock always reports 100 prompt tokens: always past 75 %
+    page.click("#settingSave")
+    n0 = len(state.requests)
+    page.fill("#taskInput", "E2E-COMPACT: print things")
+    page.click("#sendBtn")
+    wait_until(page, "() => S.status === 'done'", 90, "compact task done")
+    reqs = state.requests[n0:]
+    summ = [r for r in reqs if SUMMARISER_MARK in r["messages"][0]["content"]]
+    agent = [r for r in reqs if SUMMARISER_MARK not in r["messages"][0]["content"]]
+    comps = page.evaluate("() => S.timeline.filter(t => t.type === 'compaction').map(t => [t.fromStep, t.toStep, t.reason])")
+    check("compacted twice: steps 1–2 at step 7, 3–4 at step 9", comps == [[1, 2, "threshold"], [3, 4, "threshold"]], comps)
+    check("nothing compacted until enough steps were outside the kept tail", len(summ) == 2 and len(agent) == 9, (len(summ), len(agent)))
+    first = agent[6]["messages"]
+    roles = [m["role"] for m in first]
+    check("step 7 carries the summary plus steps 3–6 verbatim",
+          '<history_summary steps="1-2">' in first[1]["content"] and "MOCK-SUMMARY" in first[1]["content"]
+          and "out 3" in first[2]["content"] and len(first) == 2 + 8, [m["content"][:40] for m in first])
+    check("roles still alternate after compaction", roles[0] == "system" and all(r == ("user" if i % 2 == 0 else "assistant") for i, r in enumerate(roles[1:])), roles)
+    check("the second pass folds in the first summary", "EARLIER SUMMARY" in summ[1]["messages"][1]["content"])
+    check("compaction cards render with the summary", page.evaluate("() => document.querySelectorAll('.compaction-card .markdown').length") == 2)
+    # Rewind to step 2, before any compaction: the full history comes back.
+    idx = page.evaluate("() => S.timeline.findIndex(t => t.type === 'step' && t.n === 2)")
+    page.locator(f'[data-idx="{idx}"] [data-action=rewind]').click()
+    page.click("#confirmOk")
+    wait_until(page, "() => S.status === 'paused' && PY.state === 'idle'", 60, "rewind")
+    hist = page.evaluate("() => ({ n: S.messages.length, comp: S.compactions.length, summary: S.messages.some(m => m.content.includes('<history_summary')) })")
+    check("rewind before a compaction restores the full history", hist == {"n": 6, "comp": 0, "summary": False}, hist)
+    page.context.close()
+
+    page = open_app(browser)
+    configure(page, port, 10)
+    n0 = len(state.requests)
+    page.fill("#taskInput", "E2E-OVERFLOW: print things")
+    page.click("#sendBtn")
+    wait_until(page, "() => S.status === 'done' || S.status === 'error'", 60, "overflow task")
+    comps = page.evaluate("() => S.timeline.filter(t => t.type === 'compaction').map(t => [t.fromStep, t.toStep, t.reason])")
+    check("a context-overflow error compacts and retries", page.evaluate("() => S.status") == "done" and comps == [[1, 1, "overflow"]], comps)
+    check("…without leaving an error card", page.evaluate("() => S.timeline.some(t => t.type === 'error')") is False)
+    page.context.close()
+
+
 def main():
     browsers = sys.argv[1:] or ["chromium", "firefox"]   # also: firefox=/path/to/stock/firefox
     with sync_playwright() as pw:
@@ -553,6 +602,7 @@ def main():
                 streaming_scenario(browser, port, state)
                 phantom_scenario(browser, port, state)
                 files_scenario(browser, port, state, downloads=not exe)
+                compaction_scenario(browser, port, state)
             except AssertionError as e:
                 check(f"{name}: scenario completed", False, str(e))
             finally:

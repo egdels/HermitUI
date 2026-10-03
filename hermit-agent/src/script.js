@@ -18,7 +18,7 @@ const PYODIDE_VERSION = "0.29.5";
 const PYODIDE_CDN = "https://cdn.jsdelivr.net/pyodide/v0.29.5/full/";
 const SESSION_FORMAT = "hermit-agent-session";
 const SESSION_FORMAT_VERSION = 1;
-const LIMITS = { maxFiles: 5000, maxWorkspaceBytes: 256 * 1024 * 1024, maxArchiveEntries: 20000, maxArchiveBytes: 512 * 1024 * 1024, maxPathLength: 512, riskMaxFiles: 20, riskMaxBytes: 10 * 1024 * 1024, bootTimeoutMs: 120000, stepLimitIncrement: 10, readMaxLines: 400, readMaxChars: 32000, readMaxTotalChars: 64000, readMaxLineChars: 2000 };
+const LIMITS = { maxFiles: 5000, maxWorkspaceBytes: 256 * 1024 * 1024, maxArchiveEntries: 20000, maxArchiveBytes: 512 * 1024 * 1024, maxPathLength: 512, riskMaxFiles: 20, riskMaxBytes: 10 * 1024 * 1024, bootTimeoutMs: 120000, stepLimitIncrement: 10, readMaxLines: 400, readMaxChars: 32000, readMaxTotalChars: 64000, readMaxLineChars: 2000, compactKeepSteps: 4, compactMinSteps: 2 };
 const THROTTLE_MS = 80;
 
 // ========== 2. Helpers copied from HermitUI ==========
@@ -232,7 +232,7 @@ function chatErrorHint(message, opts) {
     if (!status && /is not valid JSON|JSON\.parse|Unexpected token/i.test(msg)) {
         return "The server answered, but not with JSON — the API Base URL probably points at a web page instead of the API (it usually ends in /v1).";
     }
-    if (/context (?:length|size|window)|n_ctx|too many tokens|maximum context/i.test(msg)) {
+    if (isContextOverflowError(msg)) {
         return "The task history no longer fits the model's context — rewind to an earlier step, start a new session, or raise the server's context size.";
     }
     // Chrome says "Failed to fetch", Firefox "NetworkError when attempting to fetch
@@ -244,6 +244,12 @@ function chatErrorHint(message, opts) {
             : `Couldn't reach ${apiUrl} — check the URL and your connection; the provider must also allow requests from a browser (CORS).`;
     }
     return "";
+}
+
+// The server refused the prompt as longer than its context (llama.cpp: "exceeds the
+// available context size"; OpenAI: "maximum context length").
+function isContextOverflowError(message) {
+    return /context (?:length|size|window)|n_ctx|too many tokens|maximum context/i.test(String(message || ""));
 }
 
 // Does a Jinja chat template actually branch on the reasoning controls? Template
@@ -345,11 +351,16 @@ function formatBytes(n) {
     return (n / 1024 / 1024).toFixed(1) + " MB";
 }
 
+// files: [{ path, size }] → "a.csv (1.2 KB), b.py (300 B)", at most 50 names.
+function formatFileList(files) {
+    const list = (files || []).map(f => `${f.path} (${formatBytes(f.size)})`);
+    if (!list.length) return "(empty)";
+    return list.slice(0, 50).join(", ") + (list.length > 50 ? `, … ${list.length - 50} more` : "");
+}
+
 // The first user message: the task plus what is in the workspace right now.
 function buildTaskMessage(task, files) {
-    const list = (files || []).map(f => `${f.path} (${formatBytes(f.size)})`);
-    const shown = list.slice(0, 50).join(", ") + (list.length > 50 ? `, … ${list.length - 50} more` : "");
-    return `Task: ${task}\n\nFiles in /workspace: ${list.length ? shown : "(empty)"}`;
+    return `Task: ${task}\n\nFiles in /workspace: ${formatFileList(files)}`;
 }
 
 // Split a model reply into its reasoning (inline think tags) and the visible text.
@@ -458,6 +469,96 @@ function appendToLastUserMessage(messages, text) {
     if (last && last.role === "user") last.content += "\n\n" + text;
     else messages.push({ role: "user", content: text });
     return messages;
+}
+
+// ---------- Context compaction (DESIGN §5.4) ----------
+function messageChars(messages) {
+    let n = 0;
+    for (const m of messages || []) n += String(m.content || "").length;
+    return n;
+}
+
+// A prompt-size estimate: characters times the tokens per character measured on the
+// previous request (its prompt_tokens over the characters it sent); 1/3.5 until then.
+function estimateTokens(messages, ratio) {
+    return Math.ceil(messageChars(messages) * (Number.isFinite(ratio) && ratio > 0 ? ratio : 1 / 3.5));
+}
+
+// The context size to compact against: the setting when set, else the server's n_ctx,
+// else 0 (unknown: only a context-overflow error triggers a compaction).
+function contextLimit(setting, serverCtx) {
+    if (Number.isFinite(setting) && setting > 0) return setting;
+    return Number.isFinite(serverCtx) && serverCtx > 0 ? serverCtx : 0;
+}
+
+// Is the history at pct % of the context or beyond? pct 0 turns auto-compaction off.
+function compactionDue(estTokens, limit, pct) {
+    return pct > 0 && limit > 0 && estTokens >= limit * pct / 100;
+}
+
+// Where to cut the history. messages[0] is the system prompt, messages[1] the task, and
+// after that assistant and user turns alternate, one assistant message per step. The
+// last keepSteps steps stay verbatim, so the kept tail starts at an assistant message
+// and the roles still alternate once the summary is merged into the task message.
+// Returns { cut, steps }: messages[2..cut) hold `steps` steps to summarise. null when
+// fewer than minSteps would be summarised.
+function planCompaction(messages, keepSteps, minSteps) {
+    const at = [];
+    for (let i = 2; i < messages.length; i++) if (messages[i].role === "assistant") at.push(i);
+    const steps = at.length - Math.max(1, keepSteps);
+    if (steps < Math.max(1, minSteps)) return null;
+    return { cut: at[steps], steps };
+}
+
+// The task message without the summary an earlier compaction added to it.
+function taskMessageBase(content) {
+    const s = String(content || "");
+    const i = s.indexOf("\n\n<history_summary ");
+    return i < 0 ? s : s.slice(0, i);
+}
+
+// The summariser's request: the task message (with any earlier summary) and the steps
+// up to cut, each clipped so the request itself fits where the agent's no longer does.
+function buildCompactionRequest(messages, cut) {
+    const system = `You compress the history of an AI agent's session so the agent can continue its task with less context. The agent solves tasks by writing Python and file actions that run in /workspace. You get its earlier turns (AGENT) and what came back (RESULT: <observation> envelopes, plus notes, answers and follow-ups from the user).
+
+Write a summary the agent can continue from, under these headings, in this order, in at most 400 words:
+## Task
+The task and every follow-up, answer or instruction from the user. Keep their wording where it matters.
+## Done so far
+What was done and what it found, briefly. Keep the exact values the task needs: numbers, names, columns, paths.
+## Files
+Files in /workspace that were created or changed, and what each holds.
+## Interpreter state
+Variables, functions and imports later steps rely on. Say if the interpreter was restarted.
+## Errors and dead ends
+What failed and why, so it isn't repeated.
+## Next
+What the agent was about to do.
+
+If the history starts with an earlier summary, fold it in. Write only the summary: no preamble, no code to run, no file actions.`;
+    const parts = ["HISTORY:", taskMessageBase(messages[1].content)];
+    const prev = String(messages[1].content).slice(taskMessageBase(messages[1].content).length).trim();
+    if (prev) parts.push("EARLIER SUMMARY:\n" + prev);
+    for (let i = 2; i < cut; i++) {
+        const m = messages[i];
+        parts.push(`--- ${m.role === "assistant" ? "AGENT" : "RESULT"} ---\n` + truncateOutput(m.content, 1500, 1500));
+    }
+    return [
+        { role: "system", content: system },
+        { role: "user", content: parts.join("\n\n") + "\n\nWrite the summary now." },
+    ];
+}
+
+// The compacted history: system prompt, task message plus the summary of steps
+// 1..toStep and the current file list, then the kept tail.
+function buildCompactedMessages(messages, cut, summary, toStep, files) {
+    const block = `<history_summary steps="1-${toStep}">\nSteps 1–${toStep} were summarised to save context. The interpreter and /workspace are unaffected.\n\n${String(summary).trim()}\n</history_summary>\n\nFiles in /workspace now: ${formatFileList(files)}`;
+    return [
+        { role: messages[0].role, content: messages[0].content },
+        { role: "user", content: taskMessageBase(messages[1].content) + "\n\n" + block },
+        ...messages.slice(cut).map(m => ({ role: m.role, content: m.content })),
+    ];
 }
 
 // A relative workspace path that can't escape /workspace or confuse a zip tool.
@@ -908,6 +1009,7 @@ function transcriptMarkdown(session) {
         else if (item.type === "user") md.push(`## ${item.kind === "answer" ? "User answer" : item.kind === "followup" ? "Follow-up" : "User note"}`, ``, item.text, ``);
         else if (item.type === "note") md.push(`> ${String(item.text).replace(/\n/g, "\n> ")}`, ``);
         else if (item.type === "error") md.push(`> **Error:** ${item.text}`, ``);
+        else if (item.type === "compaction") md.push(`## History compacted — steps ${item.fromStep}–${item.toStep}`, ``, `<details><summary>Summary the model continued from</summary>`, ``, item.summary || "", ``, `</details>`, ``);
         else if (item.type === "step") {
             const verdict = item.decision ? ` · ${item.decision}${item.decidedBy ? " by " + item.decidedBy : ""}` : "";
             md.push(`## Step ${item.n} — ${item.kind}${item.status ? " · " + item.status : ""}${verdict}`, ``);
@@ -934,7 +1036,7 @@ function transcriptMarkdown(session) {
 }
 
 // state: { session, files: Map(path -> { hash, origin }), blobs: Map(hash -> bytes),
-// checkpoints: [{ timelineLength, msgCount, stepCount, label, files: { path: { hash, origin } } }] }
+// checkpoints: [{ timelineLength, msgCount, stepCount, epoch, label, files: { path: { hash, origin } } }] }
 // Returns zip entries (DESIGN §3.1). Checkpoint blobs already in workspace/ aren't repeated.
 function buildSessionArchive(state, opts) {
     const o = opts || {};
@@ -989,9 +1091,15 @@ function validateSession(raw) {
     if (typeof raw.task !== "string") throw new Error("session.json: 'task' is missing.");
     if (!Array.isArray(raw.messages)) throw new Error("session.json: 'messages' is missing.");
     if (!Array.isArray(raw.timeline)) throw new Error("session.json: 'timeline' is missing.");
-    const messages = raw.messages.map((m, i) => {
-        if (!m || !["system", "user", "assistant"].includes(m.role) || typeof m.content !== "string") throw new Error(`session.json: message ${i} is malformed.`);
+    const msgList = (arr, where) => arr.map((m, i) => {
+        if (!m || !["system", "user", "assistant"].includes(m.role) || typeof m.content !== "string") throw new Error(`session.json: ${where} ${i} is malformed.`);
         return { role: m.role, content: m.content };
+    });
+    const messages = msgList(raw.messages, "message");
+    if (raw.compactions !== undefined && !Array.isArray(raw.compactions)) throw new Error("session.json: 'compactions' is not a list.");
+    const compactions = (raw.compactions || []).map((c, i) => {
+        if (!c || !Array.isArray(c.before) || !Number.isInteger(c.fromStep) || !Number.isInteger(c.toStep) || c.fromStep < 1 || c.toStep < c.fromStep) throw new Error(`session.json: compaction ${i} is malformed.`);
+        return { before: msgList(c.before, `compaction ${i} message`), fromStep: c.fromStep, toStep: c.toStep };
     });
     const fileList = (v, withPrev) => (Array.isArray(v) ? v : []).filter(x => x && isSafeRelPath(x.path)).map(x => {
         const r = { path: x.path, hash: /^[0-9a-f]{64}$/.test(x.hash) ? x.hash : "", size: num(x.size, 0) };
@@ -1007,6 +1115,7 @@ function validateSession(raw) {
             case "user": return { type: "user", text: str(it.text), kind: ["guidance", "answer", "followup"].includes(it.kind) ? it.kind : "guidance", ts };
             case "note": return { type: "note", text: str(it.text), tone: ["info", "warn", "error"].includes(it.tone) ? it.tone : "info", ts };
             case "error": return { type: "error", text: str(it.text), hint: str(it.hint), ts };
+            case "compaction": return { type: "compaction", reason: it.reason === "overflow" ? "overflow" : "threshold", fromStep: num(it.fromStep, 0), toStep: num(it.toStep, 0), summary: str(it.summary), tokensBefore: num(it.tokensBefore, 0), tokensAfter: num(it.tokensAfter, 0), ts };
             case "step": {
                 const s = { type: "step", n: num(it.n, 0), ts, checkpoint: Number.isInteger(it.checkpoint) ? it.checkpoint : undefined };
                 for (const k of STEP_STRINGS) s[k] = str(it[k]);
@@ -1046,6 +1155,7 @@ function validateSession(raw) {
         createdAt: str(raw.createdAt),
         status: str(raw.status) || "paused",
         messages,
+        compactions,
         timeline,
         origins,
         stepCount: num(raw.stepCount, timeline.filter(t => t.type === "step").length),
@@ -1056,6 +1166,7 @@ function validateSession(raw) {
             autonomy: ["approve", "risk", "autopilot"].includes(st.autonomy) ? st.autonomy : "risk",
             stepLimit: num(st.stepLimit, 20), stepTimeoutSec: num(st.stepTimeoutSec, 60),
             maxTokens: num(st.maxTokens, 8192), effort: ["off", "low", "medium", "high", "default"].includes(st.effort) ? st.effort : "low",
+            autoCompactPct: Math.min(95, Math.max(0, num(st.autoCompactPct, 75))), contextSize: Math.max(0, num(st.contextSize, 0)),
         },
     };
 }
@@ -1102,14 +1213,18 @@ async function parseSessionArchive(entries) {
             if (!cp || typeof cp !== "object" || !cp.files || typeof cp.files !== "object") throw bad("is malformed");
             const ints = ["timelineLength", "msgCount", "stepCount"];
             for (const k of ints) if (!Number.isInteger(cp[k]) || cp[k] < 0) throw bad(`has no valid ${k}`);
-            if (cp.timelineLength > session.timeline.length || cp.msgCount > session.messages.length) throw bad("points past the end of the session");
+            // epoch: how many compactions had happened (absent in exports from before them).
+            const epoch = cp.epoch === undefined ? session.compactions.length : cp.epoch;
+            if (!Number.isInteger(epoch) || epoch < 0 || epoch > session.compactions.length) throw bad("has no valid epoch");
+            const histLen = epoch < session.compactions.length ? session.compactions[epoch].before.length : session.messages.length;
+            if (cp.timelineLength > session.timeline.length || cp.msgCount > histLen) throw bad("points past the end of the session");
             const out = {};
             for (const [p, f] of Object.entries(cp.files)) {
                 if (!isSafeRelPath(p) || !f || !/^[0-9a-f]{64}$/.test(f.hash) || !["user", "agent"].includes(f.origin)) throw bad(`has a bad file entry ${JSON.stringify(p)}`);
                 if (!blobs.has(f.hash)) throw bad(`references missing content for ${p}`);
                 out[p] = { hash: f.hash, origin: f.origin };
             }
-            return { timelineLength: cp.timelineLength, msgCount: cp.msgCount, stepCount: cp.stepCount, label: typeof cp.label === "string" ? cp.label : "", files: out };
+            return { timelineLength: cp.timelineLength, msgCount: cp.msgCount, stepCount: cp.stepCount, epoch, label: typeof cp.label === "string" ? cp.label : "", files: out };
         });
     }
     return { session, files, blobs, checkpoints };
@@ -1515,6 +1630,9 @@ function currentReasoningParams() {
 const SETTINGS = {
     apiUrl: "http://localhost:8080/v1", apiKey: "", model: "", instructions: "",
     autonomy: "risk", stepLimit: 20, stepTimeoutSec: 60, maxTokens: 8192, effort: "low",
+    // DESIGN §5.4: summarise older steps at this % of the context (0 = off), measured
+    // against contextSize, or the server's n_ctx when that is 0.
+    autoCompactPct: 75, contextSize: 0,
 };
 
 // The canonical workspace (DESIGN §4.1): path -> { hash, origin }, content-addressed blobs.
@@ -1526,11 +1644,17 @@ function freshSession() {
         task: "", createdAt: new Date().toISOString(), status: "idle",
         messages: [], timeline: [], stepCount: 0, stepBudget: 0,
         tokens: { prompt: 0, completion: 0 }, activeMs: 0,
+        // One entry per compaction: the full history it replaced, so a rewind to an
+        // earlier checkpoint can restore it. A checkpoint's epoch indexes this list.
+        compactions: [],
     };
 }
 let S = freshSession();
 // step: the step being worked on; activity: what it's doing right now, for the status bar.
-const RUN = { active: false, abort: null, stopRequested: false, decision: null, activeSince: 0, modelNotes: [], step: 0, activity: "" };
+// tokenRatio: prompt tokens per character on the last request (estimateTokens);
+// overflowRetried: this turn already compacted after a context-overflow error;
+// compactAfter: no threshold compaction before this step count (after a failed one).
+const RUN = { active: false, abort: null, stopRequested: false, decision: null, activeSince: 0, modelNotes: [], step: 0, activity: "", tokenRatio: 0, overflowRetried: false, compactAfter: 0 };
 
 function workspaceSize() {
     let total = 0;
@@ -1545,7 +1669,7 @@ function snapshotFiles() {
 }
 
 function takeCheckpoint(label) {
-    const cp = { timelineLength: S.timeline.length, msgCount: S.messages.length, stepCount: S.stepCount, label, files: snapshotFiles() };
+    const cp = { timelineLength: S.timeline.length, msgCount: S.messages.length, stepCount: S.stepCount, epoch: S.compactions.length, label, files: snapshotFiles() };
     CHECKPOINTS.push(cp);
     return CHECKPOINTS.length - 1;
 }
@@ -1640,6 +1764,7 @@ async function startTask(text) {
         { role: "user", content: buildTaskMessage(text, files) },
     ];
     RUN.modelNotes = [];
+    RUN.compactAfter = 0;
     renderTimeline();
     addTimelineItem({ type: "task", text, files: files.map(f => f.path) });
     S.timeline[S.timeline.length - 1].checkpoint = takeCheckpoint("start");
@@ -1681,6 +1806,7 @@ async function runLoop() {
     if (RUN.active) return;
     RUN.active = true;
     RUN.stopRequested = false;
+    RUN.overflowRetried = false;
     RUN.activeSince = Date.now();
     setStatus("running");
     try {
@@ -1730,6 +1856,14 @@ async function runLoop() {
 async function agentTurn() {
     const n = S.stepCount + 1;
     RUN.step = n;
+    if (SETTINGS.autoCompactPct > 0 && S.stepCount >= RUN.compactAfter) {
+        await ensureReasoningProbe().catch(() => {});   // n_ctx comes with the probe
+        const limit = contextLimit(SETTINGS.contextSize, REASONING.nCtx);
+        if (compactionDue(estimateTokens(S.messages, RUN.tokenRatio), limit, SETTINGS.autoCompactPct)) {
+            const r = await compactHistory("threshold");
+            if (r === "stopped") { addNote("⏹ Stopped while compacting the history."); setStatus("stopped"); return "stopped"; }
+        }
+    }
     setActivity("thinking");
     debugLog("model", `→ request to ${SETTINGS.model || "default model"} · ${S.messages.length} messages · effort ${SETTINGS.effort}`);
     const step = addTimelineItem({
@@ -1766,6 +1900,13 @@ async function agentTurn() {
         renderTimeline();
         if (e.name === "AbortError") { debugLog("model", "request aborted"); addNote("⏹ Stopped the model request."); setStatus("stopped"); return "stopped"; }
         debugLog("error", "model request failed: " + (e.message || e));
+        // The prompt no longer fits: compact once (as far as it takes) and ask again.
+        if (isContextOverflowError(e.message) && SETTINGS.autoCompactPct > 0 && !RUN.overflowRetried) {
+            RUN.overflowRetried = true;
+            const r = await compactHistory("overflow");
+            if (r === "stopped") { addNote("⏹ Stopped while compacting the history."); setStatus("stopped"); return "stopped"; }
+            if (r === "compacted") return "continue";
+        }
         const hint = chatErrorHint(e.message, { apiUrl: SETTINGS.apiUrl, mixedContent: isBlockedMixedContent(SETTINGS.apiUrl) });
         addTimelineItem({ type: "error", text: e.message || String(e), hint });
         setStatus("error");
@@ -1774,8 +1915,10 @@ async function agentTurn() {
         RUN.abort = null;
     }
     render.cancel();
+    RUN.overflowRetried = false;
     S.tokens.prompt += result.usage.prompt;
     S.tokens.completion += result.usage.completion;
+    if (result.usage.prompt > 0) RUN.tokenRatio = result.usage.prompt / Math.max(1, messageChars(S.messages));
     const split = splitReply(rawContent, true);
     step.reasoning = [apiReasoning, split.reasoning].filter(Boolean).join("\n\n");
     step.content = split.text;
@@ -1869,6 +2012,62 @@ async function agentTurn() {
     renderWorkspace();
     renderStatusBar();
     return "continue";
+}
+
+// DESIGN §5.4: summarise the older steps into the task message, keeping the last few
+// verbatim. reason: "threshold" (the history neared the context limit) or "overflow"
+// (the server refused it; then as many steps as it takes are summarised). Returns
+// "compacted" | "skipped" (nothing to summarise, or it failed: the history is
+// unchanged) | "stopped".
+async function compactHistory(reason) {
+    const force = reason === "overflow";
+    let plan = planCompaction(S.messages, LIMITS.compactKeepSteps, force ? 1 : LIMITS.compactMinSteps);
+    for (let keep = LIMITS.compactKeepSteps - 1; !plan && force && keep >= 1; keep--) plan = planCompaction(S.messages, keep, 1);
+    if (!plan) return "skipped";
+    const prevTo = S.compactions.length ? S.compactions[S.compactions.length - 1].toStep : 0;
+    const fromStep = prevTo + 1, toStep = prevTo + plan.steps;
+    const tokensBefore = estimateTokens(S.messages, RUN.tokenRatio);
+    setActivity("compacting");
+    debugLog("model", `→ compacting steps ${fromStep}–${toStep} (${reason}) · ~${tokensBefore} tokens`);
+    const payload = {
+        model: SETTINGS.model || "local-model",
+        messages: buildCompactionRequest(S.messages, plan.cut),
+        stream: true,
+        stream_options: { include_usage: true },
+        ...currentReasoningParams(),
+    };
+    if (SETTINGS.maxTokens > 0) payload.max_tokens = SETTINGS.maxTokens;
+    let text = "";
+    let result;
+    RUN.abort = new AbortController();
+    try {
+        result = await streamChat(payload, RUN.abort.signal, (r, c) => { text += c; });
+    } catch (e) {
+        if (e.name === "AbortError") { debugLog("model", "compaction aborted"); return "stopped"; }
+        debugLog("error", "compaction failed: " + (e.message || e));
+        RUN.compactAfter = S.stepCount + LIMITS.compactMinSteps;
+        if (!force) addNote(`⚠️ Couldn't compact the history (${e.message || e}). Continuing with the full history.`, "warn");
+        return "skipped";
+    } finally {
+        RUN.abort = null;
+    }
+    S.tokens.prompt += result.usage.prompt;
+    S.tokens.completion += result.usage.completion;
+    const summary = splitReply(text, true).text.trim();
+    if (!summary) {
+        debugLog("error", "compaction failed: empty summary");
+        RUN.compactAfter = S.stepCount + LIMITS.compactMinSteps;
+        addNote("⚠️ Couldn't compact the history: the model returned an empty summary. Continuing with the full history.", "warn");
+        return "skipped";
+    }
+    const files = [...WS.files].map(([p, f]) => ({ path: p, size: (WS.blobs.get(f.hash) || []).length }));
+    S.compactions.push({ before: S.messages.map(m => ({ role: m.role, content: m.content })), fromStep, toStep });
+    S.messages = buildCompactedMessages(S.messages, plan.cut, summary, toStep, files);
+    const tokensAfter = estimateTokens(S.messages, RUN.tokenRatio);
+    debugLog("result", `history compacted · steps ${fromStep}–${toStep} · ~${tokensBefore} → ~${tokensAfter} tokens`, clipForDebug(summary, 4000));
+    addTimelineItem({ type: "compaction", reason, fromStep, toStep, summary, tokensBefore, tokensAfter });
+    renderStatusBar();
+    return "compacted";
 }
 
 // Run the step's code under the current autonomy level, gate it on its effect, and
@@ -2143,6 +2342,14 @@ async function rewindTo(idx) {
     const ci = item.checkpoint;
     const cp = CHECKPOINTS[ci];
     S.timeline.length = cp.timelineLength;
+    // A checkpoint from before a compaction: bring back the history it replaced (with
+    // today's system prompt, which Settings may have changed since).
+    if ((cp.epoch || 0) < S.compactions.length) {
+        const system = S.messages[0];
+        S.messages = S.compactions[cp.epoch || 0].before.map(m => ({ role: m.role, content: m.content }));
+        if (system && system.role === "system" && S.messages[0].role === "system") S.messages[0] = system;
+        S.compactions.length = cp.epoch || 0;
+    }
     S.messages.length = cp.msgCount;
     S.stepCount = cp.stepCount;
     CHECKPOINTS = CHECKPOINTS.slice(0, ci + 1);
@@ -2151,6 +2358,7 @@ async function rewindTo(idx) {
     WS.lastChanged = new Set();
     collectGarbage();
     RUN.modelNotes = ["The session was rewound to this point and the interpreter was restarted: variables are lost, files are as they were at this point."];
+    RUN.compactAfter = 0;
     restartInterpreter();
     const last = S.messages[S.messages.length - 1];
     addNote(`⏪ Rewound to ${label}. ` + (last && last.role === "user" ? "Press Continue to resume, or send a note first." : "Send a follow-up to continue."));
@@ -2441,6 +2649,18 @@ function buildCard(item, idx, old) {
         card.appendChild(el("p", "task-text", item.text));
         return card;
     }
+    if (item.type === "compaction") {
+        const card = el("article", "card compaction-card");
+        card.appendChild(el("div", "card-head")).appendChild(el("span", "card-title", "🗜️ History compacted"));
+        const k = (v) => (v >= 1000 ? (v / 1000).toFixed(1) + "k" : String(v));
+        const why = item.reason === "overflow" ? "after the server refused the prompt as too long" : "as it neared the context limit";
+        card.appendChild(el("p", "hint", `Steps ${item.fromStep}–${item.toStep} were summarised for the model ${why} (~${k(item.tokensBefore)} → ~${k(item.tokensAfter)} tokens). The timeline keeps the full record, and rewinding to an earlier step restores the full history.`));
+        const d = el("details", "think-block");
+        d.appendChild(el("summary", "", "📝 Summary the model continues from"));
+        d.appendChild(renderMarkdown(item.summary));
+        card.appendChild(d);
+        return card;
+    }
     if (item.type === "error") {
         const card = el("article", "card error-card");
         card.appendChild(el("p", "error-text", "❌ " + item.text));
@@ -2729,7 +2949,7 @@ function formatDuration(ms) {
     return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-const ACTIVITY_LABELS = { thinking: "model thinking…", writing: "model writing…", python: "running Python", files: "file actions" };
+const ACTIVITY_LABELS = { thinking: "model thinking…", writing: "model writing…", python: "running Python", files: "file actions", compacting: "compacting history…" };
 const STATE_LABELS = { idle: "ready", running: "working", "awaiting-approval": "waiting for you", "awaiting-user": "question for you", done: "done", stopped: "stopped", paused: "paused", error: "error" };
 const INTERP_LABELS = { off: "not started", booting: "booting…", idle: "idle", running: "running", failed: "failed" };
 
@@ -2789,6 +3009,8 @@ function fillSettingsForm() {
     $("settingStepLimit").value = SETTINGS.stepLimit;
     $("settingTimeout").value = SETTINGS.stepTimeoutSec;
     $("settingMaxTokens").value = SETTINGS.maxTokens;
+    $("settingAutoCompact").value = SETTINGS.autoCompactPct;
+    $("settingContextSize").value = SETTINGS.contextSize;
     $("reasoningStatus").textContent = REASONING.key ? `Reasoning control: ${REASONING.state} (${REASONING.source || ""})` : "";
 }
 
@@ -2810,6 +3032,9 @@ function saveSettings() {
     SETTINGS.stepLimit = int("settingStepLimit", 1, 500, 20);
     SETTINGS.stepTimeoutSec = int("settingTimeout", 1, 3600, 60);
     SETTINGS.maxTokens = int("settingMaxTokens", 0, 1000000, 8192);
+    SETTINGS.autoCompactPct = int("settingAutoCompact", 0, 95, 75);
+    SETTINGS.contextSize = int("settingContextSize", 0, 10000000, 0);
+    RUN.compactAfter = 0;
     if (S.messages.length && S.messages[0].role === "system") S.messages[0].content = buildSystemPrompt(SETTINGS.instructions);
     renderHeader();
     return true;
@@ -2867,9 +3092,9 @@ function sessionSnapshot() {
     return {
         session: {
             task: S.task, createdAt: S.createdAt, status: S.status, messages: S.messages, timeline: S.timeline,
-            stepCount: S.stepCount, tokens: S.tokens, activeMs: S.activeMs,
+            stepCount: S.stepCount, tokens: S.tokens, activeMs: S.activeMs, compactions: S.compactions,
             // Non-secret connection settings only: the API key is never exported.
-            settings: { apiUrl: SETTINGS.apiUrl, model: SETTINGS.model, autonomy: SETTINGS.autonomy, stepLimit: SETTINGS.stepLimit, stepTimeoutSec: SETTINGS.stepTimeoutSec, maxTokens: SETTINGS.maxTokens, effort: SETTINGS.effort },
+            settings: { apiUrl: SETTINGS.apiUrl, model: SETTINGS.model, autonomy: SETTINGS.autonomy, stepLimit: SETTINGS.stepLimit, stepTimeoutSec: SETTINGS.stepTimeoutSec, maxTokens: SETTINGS.maxTokens, effort: SETTINGS.effort, autoCompactPct: SETTINGS.autoCompactPct, contextSize: SETTINGS.contextSize },
         },
         files: WS.files, blobs: WS.blobs, checkpoints: CHECKPOINTS,
     };
@@ -2919,6 +3144,7 @@ async function importSessionFile(file) {
     Object.assign(S, {
         task: s.task, createdAt: s.createdAt, status: "paused", messages: s.messages, timeline: s.timeline,
         stepCount: s.stepCount, stepBudget: s.stepCount + SETTINGS.stepLimit, tokens: s.tokens, activeMs: s.activeMs,
+        compactions: s.compactions,
     });
     WS.files = parsed.files;
     WS.blobs = parsed.blobs;
@@ -2935,6 +3161,9 @@ async function importSessionFile(file) {
     SETTINGS.stepLimit = s.settings.stepLimit;
     SETTINGS.stepTimeoutSec = s.settings.stepTimeoutSec;
     SETTINGS.maxTokens = s.settings.maxTokens;
+    SETTINGS.autoCompactPct = s.settings.autoCompactPct;
+    SETTINGS.contextSize = s.settings.contextSize;
+    RUN.compactAfter = 0;
     $("autonomySelect").value = SETTINGS.autonomy;
     RUN.modelNotes = ["This session was restored from an export into a fresh interpreter: variables are lost, files are intact."];
     restartInterpreter();
