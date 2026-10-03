@@ -51,7 +51,12 @@ onmessage = async (e) => {
   await ready;
   const { id, op, code, files } = e.data;
   if (op === "seed") {
-    for (const [p, text] of Object.entries(files)) py.FS.writeFile("/workspace/" + p, text);
+    // Base64 so binary files survive; paths may contain subfolders.
+    for (const [p, b64] of Object.entries(files)) {
+      const full = "/workspace/" + p;
+      py.FS.mkdirTree(full.slice(0, full.lastIndexOf("/")));
+      py.FS.writeFile(full, Uint8Array.from(atob(b64), c => c.charCodeAt(0)));
+    }
     postMessage({ id, ok: true });
     return;
   }

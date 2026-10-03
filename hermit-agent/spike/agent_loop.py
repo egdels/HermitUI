@@ -7,8 +7,15 @@ calculation) and checks each result automatically. There is no supervision UI,
 gating or export; that is Phase 1 proper.
 
     ../../benchmark/.venv/bin/python agent_loop.py --base-url http://localhost:8080/v1
+
+Try your own task (the files are copied into /workspace; when it finishes the
+workspace is saved to out/<timestamp>/, and you can answer `ask:` questions and
+send follow-ups on the terminal):
+
+    ../../benchmark/.venv/bin/python agent_loop.py --task "chart the monthly totals" --file data.csv
 """
 import argparse
+import base64
 import functools
 import http.server
 import json
@@ -153,13 +160,21 @@ def indent(s, prefix="    │ "):
     return "\n".join(prefix + line for line in s.splitlines()) or prefix
 
 
-def run_task(page, args, task):
-    page.reload()
-    page.evaluate("f => seedFiles(f)", task["files"])
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task["prompt"]}]
-    stats = {"steps": 0, "errors": 0, "tokens": 0, "llm_s": 0.0, "run_s": 0.0}
+def seed(page, files):
+    """files: {workspace path: bytes or str}."""
+    enc = {p: base64.b64encode(b.encode() if isinstance(b, str) else b).decode() for p, b in files.items()}
+    page.evaluate("f => seedFiles(f)", enc)
+
+
+def new_stats():
+    return {"steps": 0, "errors": 0, "tokens": 0, "llm_s": 0.0, "run_s": 0.0}
+
+
+def agent_loop(page, args, messages, stats):
+    """Run until the model answers, asks, or uses up --max-steps. Returns (kind, text) or None."""
     final = None
-    for step in range(1, args.max_steps + 1):
+    for _ in range(args.max_steps):
+        step = stats["steps"] + 1
         print(f"  step {step}: asking model …")
         t0 = time.time()
         content, reasoning, usage = chat(args.base_url, args.model, messages, args.max_tokens)
@@ -193,7 +208,15 @@ def run_task(page, args, task):
         messages.append({"role": "user", "content": observation(step, r, note)})
     else:
         print(f"  step limit ({args.max_steps}) reached")
+    return final
 
+
+def run_task(page, args, task):
+    page.reload()
+    seed(page, task["files"])
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task["prompt"]}]
+    stats = new_stats()
+    final = agent_loop(page, args, messages, stats)
     if "check" in task:
         r = page.evaluate("([c, t]) => runStep(c, t)", [task["check"], 60000])
         passed = "CHECK OK" in r["output"]
@@ -205,6 +228,62 @@ def run_task(page, args, task):
     return passed, detail, stats, final
 
 
+EXPORT_CODE = """
+def _hermit_export():
+    import os, base64, json
+    out = {}
+    for root, dirs, files in os.walk("/workspace"):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for f in files:
+            p = os.path.join(root, f)
+            with open(p, "rb") as fh:
+                out[os.path.relpath(p, "/workspace")] = base64.b64encode(fh.read()).decode()
+    print(json.dumps(out))
+_hermit_export()
+del _hermit_export
+"""
+
+
+def run_custom(page, args):
+    """Your own task: seed --file(s), loop, let the user answer asks and follow up, save the workspace."""
+    files = {}
+    for f in args.file or []:
+        path = pathlib.Path(f)
+        if path.is_dir():
+            for sub in path.rglob("*"):
+                if sub.is_file():
+                    files[str(pathlib.PurePosixPath(path.name, *sub.relative_to(path).parts))] = sub.read_bytes()
+        else:
+            files[path.name] = path.read_bytes()
+    if files:
+        seed(page, files)
+        print(f"workspace: {', '.join(sorted(files))}")
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": args.task}]
+    stats = new_stats()
+    while True:
+        final = agent_loop(page, args, messages, stats)
+        prompt = "your answer> " if final and final[0] == "ask" else "follow-up (Enter to finish)> "
+        try:
+            reply = input("\n" + prompt).strip()
+        except EOFError:
+            reply = ""
+        if not reply:
+            break
+        messages.append({"role": "user", "content": reply})
+
+    r = page.evaluate("([c, t]) => runStep(c, t)", [EXPORT_CODE, 60000])
+    workspace = json.loads(r["output"]) if r["status"] == "ok" else {}
+    if workspace:
+        out = HERE / "out" / time.strftime("%Y%m%d-%H%M%S")
+        for p, b64 in workspace.items():
+            dest = out / p
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(base64.b64decode(b64))
+        print(f"\nworkspace saved to {out} ({len(workspace)} files)")
+    print(f"{stats['steps']} steps ({stats['errors']} failed), {stats['tokens']} tokens, "
+          f"llm {stats['llm_s']:.0f}s, python {stats['run_s']:.0f}s")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default="http://localhost:8080/v1")
@@ -213,6 +292,8 @@ def main():
     ap.add_argument("--step-timeout", type=int, default=60, help="seconds per code step")
     ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument("--only", help="run only tasks whose name contains this")
+    ap.add_argument("--task", help="run your own task instead of the reference tasks")
+    ap.add_argument("--file", action="append", help="file or folder to put in /workspace (repeatable, with --task)")
     args = ap.parse_args()
 
     results = []
@@ -232,6 +313,11 @@ def main():
         if r["status"] != "ok":
             sys.exit(f"Pyodide failed to boot: {r['output']}")
         print(f"Pyodide {r['output'].split()[0]} ready in {time.time() - t0:.1f}s")
+        if args.task:
+            print(f"\n=== your task ===\n  task: {args.task}")
+            run_custom(page, args)
+            browser.close()
+            return
         for task in TASKS:
             if args.only and args.only not in task["name"]:
                 continue
