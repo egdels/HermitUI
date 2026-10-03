@@ -52,7 +52,8 @@ What makes it different from CLI agents is that **you can supervise it**:
   workspace is gone when you close the tab.
 - **Sessions go where you put them.** Export a whole session (conversation, steps,
   workspace, checkpoints) to a single `.zip` and import it later to resume or review.
-  The app itself still remembers nothing.
+  ➕ New can start a clean session on the same workspace files. The app itself still
+  remembers nothing.
 
 ## Relationship to HermitUI
 

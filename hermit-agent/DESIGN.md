@@ -155,6 +155,9 @@ workspace; otherwise the next python step re-seeds it.
   history after N, and restarts the interpreter. The user can then retry, edit the
   task, or inject guidance.
 - Checkpoints live in memory only. They leave the tab only via session export (§3).
+- **➕ New** clears the timeline, the model history, the checkpoints and the interpreter.
+  When the workspace has files it offers to keep them: kept files become user files
+  (origin `user`), so changing them in the new session needs approval like any upload (§2.3).
 
 ---
 

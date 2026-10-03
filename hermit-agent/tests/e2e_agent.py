@@ -351,6 +351,30 @@ def import_scenario(browser, port, state, zpath, snapshot, files_before):
     page.click("#confirmCancel")
     time.sleep(0.5)
     check("cancelled import leaves the session alone", page.evaluate("() => S.timeline.length") == 2 and [p for p, h, o in workspace(page)] == ["data.csv"])
+
+    # ➕ New: Cancel changes nothing, "Keep files" resets all but the workspace.
+    page.click("#newSessionBtn")
+    page.click("#confirmCancel")
+    check("cancelled New leaves the session alone", page.evaluate("() => S.timeline.length") == 2)
+    page.evaluate("async () => { await runInWorker('secret_var = 1', { timeoutMs: 20000 }); }")
+    kept = workspace(page)
+    page.click("#newSessionBtn")
+    check("New offers to keep the files", page.locator("#confirmAlt").is_visible())
+    page.click("#confirmAlt")
+    wait_until(page, "() => S.timeline.length === 0 && PY.state === 'idle'", 60, "new session, files kept")
+    check("New + keep: timeline and checkpoints cleared", page.evaluate("() => S.messages.length === 0 && CHECKPOINTS.length === 0"))
+    check("New + keep: workspace kept as user files", kept and workspace(page) == [[p, h, "user"] for p, h, o in kept], workspace(page))
+    listing = page.evaluate("async () => { const r = await runInWorker('import os\\nprint(sorted(os.listdir(\".\")), \"secret_var\" in globals())', { timeoutMs: 20000 }); return r.output; }")
+    check("New + keep: fresh interpreter seeded with the files", listing.strip() == "['data.csv'] False", listing)
+
+    # Workspace only, no timeline: the confirm still asks; plain OK clears everything.
+    page.click("#newSessionBtn")
+    page.click("#confirmOk")
+    wait_until(page, "() => WS.files.size === 0 && PY.state === 'idle'", 60, "new session, cleared")
+    check("New + clear: workspace emptied", workspace(page) == [])
+    page.click("#newSessionBtn")
+    time.sleep(0.3)
+    check("New on an empty session doesn't ask", not page.evaluate("() => document.getElementById('confirmModal').classList.contains('active')"))
     page.context.close()
 
 

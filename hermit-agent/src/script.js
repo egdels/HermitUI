@@ -2872,13 +2872,17 @@ function closeModal(id) {
     if (modalReturnFocus && modalReturnFocus.focus) modalReturnFocus.focus();
 }
 
-function confirmDialog(text, okLabel) {
+// Resolves true (OK), false (Cancel/Escape) or "alt" (the optional third button).
+function confirmDialog(text, okLabel, altLabel) {
     return new Promise((resolve) => {
         $("confirmText").textContent = text;
         $("confirmOk").textContent = okLabel || "OK";
-        const done = (v) => { $("confirmOk").onclick = null; $("confirmCancel").onclick = null; closeModal("confirmModal"); resolve(v); };
+        $("confirmAlt").hidden = !altLabel;
+        $("confirmAlt").textContent = altLabel || "";
+        const done = (v) => { $("confirmOk").onclick = null; $("confirmCancel").onclick = null; $("confirmAlt").onclick = null; closeModal("confirmModal"); resolve(v); };
         $("confirmOk").onclick = () => done(true);
         $("confirmCancel").onclick = () => done(false);
+        $("confirmAlt").onclick = () => done("alt");
         openModal("confirmModal");
     });
 }
@@ -3265,10 +3269,22 @@ function wireEvents() {
     $("effortSelect").addEventListener("change", (e) => { SETTINGS.effort = e.target.value; });
     $("newSessionBtn").addEventListener("click", async () => {
         if (RUN.active) { showToast("Stop the agent first."); return; }
-        if ((S.timeline.length || WS.files.size) && !(await confirmDialog("Start a new session? The timeline and the workspace are cleared. Export first if you want to keep them.", "➕ New session"))) return;
+        let choice = true;
+        if (WS.files.size) choice = await confirmDialog("Start a new session? The timeline and the model history are cleared. Keep the workspace files, or clear everything? Export first if you want to keep them.", "🗑️ Clear everything", "📁 Keep files");
+        else if (S.timeline.length) choice = await confirmDialog("Start a new session? The timeline is cleared. Export first if you want to keep it.", "➕ New session");
+        if (!choice) return;
         S = freshSession();
         CHECKPOINTS = [];
-        WS.files = new Map(); WS.blobs = new Map(); WS.version++; WS.lastChanged = new Set();
+        if (choice === "alt") {
+            // Files carried over are the user's inputs now: only files the agent created in
+            // *this* session are changed without approval (DESIGN §2.3).
+            for (const f of WS.files.values()) f.origin = "user";
+            WS.version++; WS.lastChanged = new Set();
+            collectGarbage();
+            showToast(`➕ New session, ${WS.files.size} workspace file${WS.files.size === 1 ? "" : "s"} kept.`);
+        } else {
+            WS.files = new Map(); WS.blobs = new Map(); WS.version++; WS.lastChanged = new Set();
+        }
         RUN.modelNotes = [];
         restartInterpreter();
         renderTimeline(); renderWorkspace(); setStatus("idle");
