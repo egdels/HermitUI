@@ -75,8 +75,11 @@ Playwright's Firefox 151):
   classic-worker check is the fallback, and it is untested. Firefox warns that
   Pyodide 0.29's wasm uses the deprecated legacy exception-handling `try`
   instruction. That is harmless today, but it will matter if Firefox ever drops it.
-  Not yet tested: real desktop Chrome or Edge on Windows (only headless Linux),
-  Safari, and mobile.
+  Not yet tested: Edge and Firefox on Windows, Safari, and mobile.
+- **Desktop Chrome on Windows** (the dev machine, opened by hand from
+  `C:\workspace\…`) passes every check, a little faster than headless Linux:
+  inflate 0.24 s, boot 0.75 s, kill & re-seed 0.65 s, numpy 0.39 s, storage untouched
+  (IndexedDB and caches empty, OPFS refused with SecurityError on `file://`).
 
 **Findings so far** (2026-10-03, `spike/agent_loop.py`: code-as-action loop against
 a local Qwen3.8-27B through llama.cpp, with Pyodide 314.0.7 in a Blob module worker in
