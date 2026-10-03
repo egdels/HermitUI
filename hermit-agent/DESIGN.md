@@ -279,6 +279,10 @@ Parsing rules:
 - If there is more than one code block, only the first runs, and the model is told
   so.
 - An unclosed block (the stream was cut) is treated as a failed step, not executed.
+- Only fences tagged `python` (or `py`) run. Untagged and other fences (` ```text `)
+  are prose, and the system prompt tells the model to show output that way. In the
+  spike, an optional tag made the loop execute a bare fence the model used to quote a
+  timestamp, which failed as a syntax error.
 
 ### 5.2 Observations
 Observations go back as a `user`-role message (OpenAI-schema compliant) in a fixed

@@ -44,6 +44,7 @@ Environment: Pyodide (CPython compiled to WebAssembly) running in a browser.
 
 Every reply must be exactly ONE of:
 1. Short reasoning, then exactly ONE ```python code block. It is executed and you get its output back in an <observation> message. Write nothing after the code block.
+   Only ```python blocks are executed. To show output, data or other non-Python text, use a ```text block.
 2. The final answer for the user, with NO code block, once the task is complete.
 3. A line starting with "ask:" if you cannot continue without information from the user.
 
@@ -107,7 +108,9 @@ print("CHECK OK")
     },
 ]
 
-CODE_RE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.S)
+# Only fences tagged as Python run. The tag used to be optional, so a bare ``` block
+# the model used to *show* output (a timestamp) was executed and failed as a syntax error.
+CODE_RE = re.compile(r"```(?:python3?|py)[ \t]*\n(.*?)```", re.S)
 
 
 def parse_reply(text):
@@ -115,7 +118,7 @@ def parse_reply(text):
     blocks = CODE_RE.findall(text)
     if blocks:
         return ("code", blocks[0], len(blocks))
-    if re.search(r"```(?:python|py)", text):
+    if re.search(r"```(?:python3?|py)[ \t]*$", text, re.M):
         return ("broken", "unclosed code block")
     m = re.search(r"^\s*ask:\s*(.+)", text, re.M | re.I)
     if m:
