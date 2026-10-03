@@ -54,7 +54,9 @@ headless Chromium):
   harness should drop changed workspace modules from `sys.modules` after each step
   (§4.2).
 - llama.cpp returns the reasoning in `reasoning_content`, not inline `<think>`, so
-  the timeline must read both.
+  the timeline must read both. HermitUI's `fetchAndStreamChat` already does this
+  (`reasoning_content` / `reasoning` / `thinking`, streamed and non-streamed), so
+  copy that rather than writing it again.
 
 **Exit criteria:**
 - Pyodide boots offline from a single file in at least Chrome and Firefox.
