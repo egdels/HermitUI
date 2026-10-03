@@ -11,30 +11,78 @@ references (§) point to [DESIGN.md](DESIGN.md).
 Throwaway code, kept in `hermit-agent/spike/`, which gets deleted or folded into
 `src/` afterwards. The goal is answers, not polish.
 
-- [ ] Pin a Pyodide release. Download its core files with a minimal script.
-- [ ] Single HTML file opened from **`file://`**, with no server: inline the core
+- [x] Pin a Pyodide release. Download its core files with a minimal script.
+- [x] Single HTML file opened from **`file://`**, with no server: inline the core
       (gzip + base64), create a **Blob-URL worker**, and boot Pyodide from the inlined
       bytes (§8). Record which loader options were enough and what needed a `fetch`
       shim.
-- [ ] Run code in the worker. Read and write `/workspace` on MEMFS. Return a file
+- [x] Run code in the worker. Read and write `/workspace` on MEMFS. Return a file
       listing with hashes.
-- [ ] **Kill & re-seed** (§4.3): `terminate()` during `while True: pass`, boot a fresh
+- [x] **Kill & re-seed** (§4.3): `terminate()` during `while True: pass`, boot a fresh
       worker, restore the workspace. Measure re-boot time.
 - [ ] Confirm `setInterruptBuffer` is unusable on `file://` and on GitHub Pages
-      (`crossOriginIsolated === false`).
+      (`crossOriginIsolated === false`). *`file://` confirmed in Chromium and
+      Firefox; GitHub Pages not yet checked.*
 - [ ] **Network blocking** (§10): try removing the worker globals, a CSP via `<meta>`,
       and a CSP inserted at runtime. Try to exfiltrate from Python with `pyfetch`,
       `js.fetch`, `js.XMLHttpRequest`, `js.WebSocket`, `js.eval("import(...)")` and
       nested `js.Worker`. Write down exactly what each approach blocks.
-- [ ] Load one package (numpy) on demand from the CDN, held in memory only, with no
+- [x] Load one package (numpy) on demand from the CDN, held in memory only, with no
       OPFS or IndexedDB use. Check DevTools → Application → Storage.
-- [ ] Measure: standalone file size; cold boot time in Chrome, Firefox and Safari if
-      available; memory after boot.
+- [x] Measure: standalone file size; cold boot time in Chrome, Firefox and Safari if
+      available; memory after boot. *No Safari available on the dev machine.*
+
+**Offline boot findings** (2026-10-03, `spike/build_standalone.py` +
+`spike/probe_file_boot.py`: Pyodide **0.29.5** (Python 3.13.2) inlined into one HTML
+file, opened from `file://` in headless Chromium 149, stock Firefox 157 and
+Playwright's Firefox 151):
+- **The single-file `file://` boot works in Chromium and Firefox.** Pyodide 0.29.x
+  still runs in a *classic* worker, and both browsers start a classic Blob-URL worker
+  on `file://`. Inside the worker, `importScripts()` of a Blob URL created in that
+  worker also works. (The NetworkError in the first spike came from a URL, not a
+  blob.) What was needed:
+  - Pre-evaluate `pyodide.js` and `pyodide.asm.js` through `importScripts(blob:)`.
+    The loader skips its own script load when `_createPyodideModule` is already
+    defined.
+  - Pass a fake `indexURL` (`https://pyodide.invalid/`) and a worker-side `fetch`
+    shim that serves `pyodide.asm.wasm` (as `application/wasm`, so streaming
+    instantiation works), `python_stdlib.zip` and `pyodide-lock.json` from the
+    inlined bytes. `stdLibURL` and `lockFileContents` weren't needed.
+  - Set `packageBaseUrl` to the pinned CDN, so packages still load on demand.
+  - The indirect-`eval` fallback in the spike was never used.
+- **Size:** the core is 12.3 MB raw and 7.3 MB inlined (gzip + base64): wasm 3.8 MB,
+  stdlib 3.2 MB (already compressed, so base64 grows it), asm.js 0.3 MB. That is
+  before HermitUI's own libraries.
+- **Boot times** (warm machine, cold page): inflating the core on the main thread
+  takes 0.2–0.35 s. From `new Worker()` to Python ready takes 1.0 s in Chromium and
+  0.9 s in stock Firefox. Playwright's patched Firefox takes 2.8 s, so don't quote
+  that build for timings. WASM memory after boot is 20 MB, and the main-thread JS
+  heap is 28 MB in Chromium.
+- **Kill & re-seed:** `terminate()` during `while True: pass`, then a fresh worker
+  plus a restored workspace (byte-identical hashes, namespace gone as expected)
+  takes 0.8 s in both browsers. That is fast enough that the warm spare worker from
+  §4.3 isn't needed yet.
+- **numpy 2.2.5 on demand** from the pinned CDN works from `file://` (the
+  null-origin CORS fetch is fine): 0.5 s in Chromium and stock Firefox. IndexedDB,
+  OPFS and Cache Storage stay empty. Firefox's `storage.estimate()` reports 544 KB
+  usage, but that is created by the probe itself (`navigator.storage.getDirectory()`
+  490 KB, `caches.keys()` 64 KB; a blank page reports 0). The real app must not call
+  either.
+- `crossOriginIsolated` is `false` and `SharedArrayBuffer` is undefined on `file://`
+  in both browsers, so `setInterruptBuffer` is out, as §4.3 assumed.
+- **Caveats:** this pins the agent to the 0.29.x line (Python 3.13) rather than 314
+  (Python 3.14). If 0.29.x stops getting maintenance releases, patching 314's
+  classic-worker check is the fallback, and it is untested. Firefox warns that
+  Pyodide 0.29's wasm uses the deprecated legacy exception-handling `try`
+  instruction. That is harmless today, but it will matter if Firefox ever drops it.
+  Not yet tested: real desktop Chrome or Edge on Windows (only headless Linux),
+  Safari, and mobile.
 
 **Findings so far** (2026-10-03, `spike/agent_loop.py`: code-as-action loop against
 a local Qwen3.8-27B through llama.cpp, with Pyodide 314.0.7 in a Blob module worker in
 headless Chromium):
-- **`file://` boot is harder than §8 assumes.** Pyodide 314 refuses classic workers
+- **`file://` boot is harder than §8 assumes** *(resolved by the offline boot
+  findings above: Pyodide 0.29.x in a classic worker)*. Pyodide 314 refuses classic workers
   ("Classic web workers are not supported"), and on a `file://` page Chromium won't
   start a Blob module worker at all, and `importScripts()` from a classic Blob worker
   fails with NetworkError. `fetch()` works in both. The spike is therefore served

@@ -243,15 +243,18 @@ below.
 ### 4.3 Kill & re-seed
 A clean interrupt (`pyodide.setInterruptBuffer`) needs `SharedArrayBuffer`, which
 requires cross-origin isolation (COOP/COEP headers). Neither `file://` nor GitHub
-Pages can provide that *(verify in spike)*. So:
+Pages can provide that. The spike confirmed this for `file://` in Chromium and
+Firefox; GitHub Pages is still unchecked. So:
 
 - **Kill** calls `worker.terminate()`. That is always available and always effective.
 - Spawn a new worker, boot Pyodide, and **re-seed** `/workspace` from the main-thread
   canonical copy (the last committed checkpoint).
 - Tell the model: "The interpreter was restarted; variables are lost; files are
   intact."
-- The boot time of a fresh worker is a spike measurement. If it is slow, keep one
-  warm spare worker.
+- Measured in the spike: kill → fresh worker → workspace restored takes about 0.8 s
+  in Chromium and Firefox, so there's no warm spare worker for now. If it is ever
+  needed, posting a pre-compiled `WebAssembly.Module` to the new worker is the next
+  lever.
 
 ### 4.4 Workspace in/out
 - Upload with the file picker or drag-drop onto the workspace panel, including
@@ -365,22 +368,31 @@ These are non-negotiable. See the root [`AGENTS.md`](../AGENTS.md).
 Pyodide normally fetches several files relative to its `indexURL`: the loader JS, the
 `.wasm`, the stdlib zip and the lock file.
 
-Plan *(verify in spike)*:
+Verified in the spike (ROADMAP Phase 0, "Offline boot findings"). This works from
+`file://` in Chromium and Firefox with **Pyodide 0.29.x**, because 0.29.x still runs in
+a *classic* worker and Chromium won't start a Blob *module* worker on `file://`.
+Pyodide 314+ is module-worker-only, so moving to it requires patching that check.
 - `build.py` downloads a **pinned** Pyodide release and inlines the core files as
   gzip + base64. This is the same technique HermitUI uses for Mermaid
   (`window.__MERMAID_INLINE__`) and the wllama engine (`window.__WLLAMA_INLINE__`),
   inflated in-browser with `DecompressionStream` (`gunzipToBytes`).
-- The worker is created from a Blob URL. Inside it, a small `fetch` shim maps
-  Pyodide's expected file names to the inlined bytes, with the correct
-  `application/wasm` MIME type so streaming instantiation works. Pyodide's own loader
-  options (`indexURL`, `stdLibURL`, `lockFileURL`) are tried first, and the shim
-  covers whatever they don't.
-- Size estimate: on the order of 10 MB of raw core, which inflates the standalone
-  HTML noticeably, plus HermitUI's existing libraries. **Measure it in the spike.**
-  Don't trust this estimate.
+- The worker is a classic worker created from a Blob URL. The main thread inflates
+  the core once and posts copies at each boot. Inside the worker, `pyodide.js` and
+  `pyodide.asm.js` are loaded with `importScripts()` on worker-made Blob URLs. The
+  loader skips its own script load when `_createPyodideModule` already exists.
+  `loadPyodide` gets a fake `indexURL`, and a worker-side `fetch` shim serves
+  `pyodide.asm.wasm` (as `application/wasm`), `python_stdlib.zip` and
+  `pyodide-lock.json` from the inlined bytes. `packageBaseUrl` points at the pinned
+  CDN.
+- Measured: the core is 12.3 MB raw and **7.3 MB inlined**, plus HermitUI's existing
+  libraries. Boot takes about 1 s (new worker to Python ready) in Chromium and Firefox,
+  plus 0.2–0.35 s to inflate once per page load. Memory after boot is 20 MB of WASM.
 
 **Packages** (numpy, pandas, matplotlib, …):
-- Default: load on demand from the **pinned** Pyodide CDN. Before a step runs, the
+- Default: load on demand from the **pinned** Pyodide CDN. Verified from `file://`:
+  numpy loads in about 0.5 s and leaves IndexedDB, OPFS and Cache Storage empty. The
+  app must not call `navigator.storage.getDirectory()` or `caches.keys()` itself,
+  because just probing them makes Firefox create storage. Before a step runs, the
   harness detects imports (`pyodide.code.find_imports`) and loads the needed packages
   through the harness, never through agent code, then shows "loaded pandas" in the
   timeline. They are held in memory only, never in a persistent cache.

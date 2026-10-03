@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HermitUI Agent spike: offline Pyodide boot</title>
+</head>
+<body>
+<p>Throwaway spike page (Phase 0, DESIGN §8). Built by <code>build_standalone.py</code>,
+driven by <code>probe_file_boot.py</code>. Open it from <code>file://</code>; results land in
+<code>window.__RESULT__</code> and below.</p>
+<pre id="log"></pre>
+<!-- @pyodide:inline -->
+<script>
+// The whole Pyodide core is inlined as gzip + base64 (window.__PYODIDE_INLINE__), the
+// same technique HermitUI uses for Mermaid and the wllama engine. Pyodide 0.29.x still
+// runs in a *classic* worker, which Chromium will start from a Blob URL on file://
+// (module workers it won't). Inside the worker, a fetch shim serves the inlined files
+// under a fake indexURL, and the two scripts are pre-evaluated so the loader never
+// tries importScripts() on a URL.
+const PYODIDE_VERSION = "@PYODIDE_VERSION@";
+const PACKAGE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
+
+const WORKER_SRC = `
+const VIRT = "https://pyodide.invalid/";
+let py;
+
+function loadScript(text, exportName) {
+  // importScripts(blob:) first; indirect eval as the fallback. The appended line
+  // exports the name, because in strict-mode eval a top-level var stays local.
+  const src = text + "\\n;globalThis." + exportName + " = " + exportName + ";";
+  try {
+    importScripts(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    return "importScripts(blob)";
+  } catch (err) {
+    (0, eval)(src);
+    return "eval (importScripts failed: " + err.name + ")";
+  }
+}
+
+async function boot(f) {
+  const t0 = performance.now();
+  const virt = {
+    "pyodide.asm.wasm": [f.wasm, "application/wasm"],
+    "python_stdlib.zip": [f.stdlib, "application/zip"],
+    "pyodide-lock.json": [f.lock, "application/json"],
+  };
+  const realFetch = globalThis.fetch.bind(globalThis);
+  const virtHits = [];
+  globalThis.fetch = (input, init) => {
+    const url = typeof input === "string" ? input : (input.url || String(input));
+    if (url.startsWith(VIRT)) {
+      const name = url.slice(VIRT.length);
+      virtHits.push(name);
+      const hit = virt[name];
+      if (!hit) return Promise.reject(new TypeError("not inlined: " + name));
+      return Promise.resolve(new Response(hit[0], { headers: { "Content-Type": hit[1] } }));
+    }
+    return realFetch(input, init);
+  };
+  const loaderHow = loadScript(f.loaderJs, "loadPyodide");
+  const asmHow = loadScript(f.asmJs, "_createPyodideModule");
+  py = await loadPyodide({ indexURL: VIRT, packageBaseUrl: f.packageCdn });
+  py.FS.mkdirTree("/workspace");
+  py.FS.chdir("/workspace");
+  return {
+    bootMs: Math.round(performance.now() - t0), loaderHow, asmHow, virtHits,
+    pyVersion: py.runPython("import sys; sys.version.split()[0]"),
+    wasmMemoryMB: Math.round(py._module.HEAPU8.length / 1048576),
+  };
+}
+
+const LIST = \`
+import os, hashlib, json
+out = {}
+for root, dirs, files in os.walk("/workspace"):
+    for f in files:
+        p = os.path.join(root, f)
+        out[os.path.relpath(p, "/workspace")] = hashlib.sha256(open(p, "rb").read()).hexdigest()[:16]
+json.dumps(out, sort_keys=True)
+\`;
+
+async function storageReport() {
+  const r = {};
+  try { r.indexedDB = (await indexedDB.databases()).map(d => d.name); } catch (e) { r.indexedDB = "n/a: " + e.name; }
+  try {
+    const root = await navigator.storage.getDirectory();
+    const names = []; for await (const k of root.keys()) names.push(k);
+    r.opfs = names;
+  } catch (e) { r.opfs = "n/a: " + e.name; }
+  try { r.caches = await caches.keys(); } catch (e) { r.caches = "n/a: " + e.name; }
+  return r;
+}
+
+onmessage = async (e) => {
+  const { id, op } = e.data;
+  try {
+    let result;
+    if (op === "boot") result = await boot(e.data.files);
+    else if (op === "run") {
+      const notes = [];
+      const t0 = performance.now();
+      await py.loadPackagesFromImports(e.data.code, { messageCallback: m => notes.push(m) });
+      const loadMs = Math.round(performance.now() - t0);
+      let out = [];
+      py.setStdout({ batched: s => out.push(s) });
+      py.runPython(e.data.code);
+      result = { output: out.join("\\n"), notes, packageLoadMs: loadMs };
+    }
+    else if (op === "list") result = JSON.parse(py.runPython(LIST, { globals: py.toPy({}) }));
+    else if (op === "export") {
+      // Snapshot the workspace as path -> bytes, for re-seeding after a kill.
+      const files = {};
+      const walk = (dir) => {
+        for (const name of py.FS.readdir(dir)) {
+          if (name === "." || name === "..") continue;
+          const p = dir + "/" + name;
+          if (py.FS.isDir(py.FS.stat(p).mode)) walk(p);
+          else files[p.slice("/workspace/".length)] = py.FS.readFile(p);
+        }
+      };
+      walk("/workspace");
+      result = files;
+    }
+    else if (op === "seed") {
+      for (const [p, bytes] of Object.entries(e.data.files)) {
+        const full = "/workspace/" + p;
+        py.FS.mkdirTree(full.slice(0, full.lastIndexOf("/")));
+        py.FS.writeFile(full, bytes);
+      }
+      result = Object.keys(e.data.files).length;
+    }
+    else if (op === "storage") result = await storageReport();
+    postMessage({ id, ok: true, result });
+  } catch (err) {
+    postMessage({ id, ok: false, error: String(err && (err.stack || err.message) || err) });
+  }
+};
+`;
+
+const logEl = document.getElementById("log");
+const log = (s) => { logEl.textContent += s + "\n"; console.log(s); };
+
+async function gunzipToBytes(b64) {
+  const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+let core;   // inflated once; each boot posts copies
+let worker, seq = 0;
+const pending = new Map();
+
+function startWorker() {
+  const url = URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" }));
+  worker = new Worker(url);   // classic: Chromium refuses Blob module workers on file://
+  worker.onerror = (e) => log("worker error: " + e.message);
+  worker.onmessage = (e) => {
+    const p = pending.get(e.data.id);
+    if (p) { pending.delete(e.data.id); e.data.ok ? p.resolve(e.data.result) : p.reject(new Error(e.data.error)); }
+  };
+}
+function call(op, extra = {}) {
+  const id = ++seq;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    worker.postMessage({ id, op, ...extra });
+  });
+}
+async function bootWorker() {
+  const t0 = performance.now();
+  startWorker();
+  const r = await call("boot", { files: { ...core, packageCdn: PACKAGE_CDN } });
+  r.totalMs = Math.round(performance.now() - t0);   // new Worker() → Python ready
+  return r;
+}
+
+(async () => {
+  const R = { env: {
+    userAgent: navigator.userAgent, protocol: location.protocol,
+    crossOriginIsolated: self.crossOriginIsolated, sharedArrayBuffer: typeof SharedArrayBuffer,
+  } };
+  try {
+    let t0 = performance.now();
+    const inl = window.__PYODIDE_INLINE__;
+    const dec = new TextDecoder();
+    core = {
+      loaderJs: dec.decode(await gunzipToBytes(inl["pyodide.js"])),
+      asmJs: dec.decode(await gunzipToBytes(inl["pyodide.asm.js"])),
+      wasm: (await gunzipToBytes(inl["pyodide.asm.wasm"])).buffer,
+      stdlib: (await gunzipToBytes(inl["python_stdlib.zip"])).buffer,
+      lock: (await gunzipToBytes(inl["pyodide-lock.json"])).buffer,
+    };
+    R.inflateMs = Math.round(performance.now() - t0);
+    log("inflated in " + R.inflateMs + " ms");
+
+    R.boot = await bootWorker();
+    log("boot: " + JSON.stringify(R.boot));
+
+    await call("run", { code: "import os\nos.makedirs('data', exist_ok=True)\nopen('data/a.txt','w').write('hello')\nopen('b.bin','wb').write(bytes(range(256)))\nx = 42\nprint('wrote')" });
+    R.listing = await call("list");
+    log("listing: " + JSON.stringify(R.listing));
+
+    // Kill & re-seed (DESIGN §4.3): snapshot, spin forever, terminate, fresh worker, restore.
+    const snap = await call("export");
+    const spin = call("run", { code: "while True: pass" }).catch(() => {});
+    await new Promise(r => setTimeout(r, 1500));
+    t0 = performance.now();
+    worker.terminate();
+    for (const p of pending.values()) p.reject(new Error("killed"));
+    pending.clear();
+    const reboot = await bootWorker();
+    await call("seed", { files: snap });
+    const relisting = await call("list");
+    R.killReseed = {
+      rebootMs: reboot.totalMs, pythonBootMs: reboot.bootMs,
+      killToRestoredMs: Math.round(performance.now() - t0),
+      workspaceRestored: JSON.stringify(relisting) === JSON.stringify(R.listing),
+      namespaceLost: (await call("run", { code: "print('x' in globals())" })).output.trim() === "False",
+    };
+    log("kill & re-seed: " + JSON.stringify(R.killReseed));
+
+    // A package on demand from the pinned CDN, in memory only.
+    try {
+      R.numpy = await call("run", { code: "import numpy as np\nprint(np.__version__, int(np.arange(10**6, dtype=np.int64).sum()))" });
+    } catch (e) { R.numpy = { error: e.message }; }
+    log("numpy: " + JSON.stringify(R.numpy));
+
+    R.storageWorker = await call("storage");
+    try { R.storageEstimate = await navigator.storage.estimate(); } catch (e) { R.storageEstimate = "n/a: " + e.name; }
+    if (performance.memory) R.mainJsHeapMB = Math.round(performance.memory.usedJSHeapSize / 1048576);
+    log("storage: " + JSON.stringify(R.storageWorker) + " " + JSON.stringify(R.storageEstimate));
+    R.ok = true;
+  } catch (e) {
+    R.ok = false; R.error = String(e.stack || e.message || e);
+    log("FAILED: " + R.error);
+  }
+  window.__RESULT__ = R;
+})();
+</script>
+</body>
+</html>
