@@ -38,7 +38,12 @@ headless Chromium):
   ("Classic web workers are not supported"), and on a `file://` page Chromium won't
   start a Blob module worker at all, and `importScripts()` from a classic Blob worker
   fails with NetworkError. `fetch()` works in both. The spike is therefore served
-  from `http://127.0.0.1`. The single-file boot is still open.
+  from `http://127.0.0.1`. The single-file boot is still open. HermitUI works around
+  the same Chromium restriction in `loadWllamaModel` (`../src/script.js`) by
+  stripping `{ type: "module" }` from the `Worker` constructor. That only works
+  because wllama's worker is classic-compatible, and Pyodide 314 isn't. Options to
+  try: Pyodide 0.29.x (still loads in classic workers) with its files fed in as Blob
+  URLs, or patching Pyodide 314's classic-worker check.
 - The loop works: all 3 reference task types passed (data processing in 2 steps,
   calculation in 1 to 4, code plus tests). The model recovered from its own errors.
 - Prompt gaps: the model tried `subprocess` to run unittest (Emscripten has no
