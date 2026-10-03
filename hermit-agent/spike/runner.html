@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HermitUI Agent spike: Pyodide runner</title>
+</head>
+<body>
+<p>Throwaway spike page driven by <code>agent_loop.py</code>. No UI.</p>
+<script>
+// Pyodide runs in a Blob-URL worker (DESIGN §4.2) so a runaway step can be
+// killed with terminate() (§4.3). The spike loads Pyodide from the CDN; the
+// inlined offline boot is a separate Phase 0 item.
+const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/";
+
+// Pyodide 314 only supports module workers, and Chromium won't start a module
+// worker (or importScripts() from a classic one) on a file:// page. So the
+// spike is served from http://127.0.0.1 by agent_loop.py; booting from
+// file:// stays open for Phase 0 (DESIGN §8).
+const WORKER_SRC = `
+import { loadPyodide } from ${JSON.stringify(PYODIDE_URL + "pyodide.mjs")};
+const SNAP = \`
+import os, hashlib, json
+def _hermit_snap():
+    out = {}
+    for root, dirs, files in os.walk("/workspace"):
+        for f in files:
+            p = os.path.join(root, f)
+            with open(p, "rb") as fh:
+                out[os.path.relpath(p, "/workspace")] = hashlib.sha256(fh.read()).hexdigest()[:16]
+    return json.dumps(out)
+\`;
+let py, out = [];
+const ready = (async () => {
+  py = await loadPyodide({ indexURL: ${JSON.stringify(PYODIDE_URL)} });
+  py.FS.mkdirTree("/workspace");
+  py.FS.chdir("/workspace");
+  py.runPython("import sys; sys.path.insert(0, '/workspace')");
+  py.setStdout({ batched: s => out.push(s) });
+  py.setStderr({ batched: s => out.push(s) });
+})();
+const snapNs = () => py.runPython(SNAP + "\\n_hermit_snap()", { globals: py.toPy({}) });
+
+// Keep the traceback from the agent's own code onwards, not Pyodide internals.
+function trimTraceback(msg) {
+  const lines = msg.split("\\n");
+  const i = lines.findIndex(l => l.includes('File "<exec>"'));
+  return i > 0 ? ["Traceback (most recent call last):", ...lines.slice(i)].join("\\n") : msg;
+}
+
+onmessage = async (e) => {
+  await ready;
+  const { id, op, code, files } = e.data;
+  if (op === "seed") {
+    for (const [p, text] of Object.entries(files)) py.FS.writeFile("/workspace/" + p, text);
+    postMessage({ id, ok: true });
+    return;
+  }
+  out = [];
+  const notes = [];
+  const before = JSON.parse(snapNs());
+  let status = "ok";
+  try {
+    await py.loadPackagesFromImports(code, { messageCallback: m => notes.push(m) });
+    await py.runPythonAsync(code);
+  } catch (err) {
+    status = "error";
+    out.push(trimTraceback(String(err.message || err)));
+  }
+  const after = JSON.parse(snapNs());
+  const changes = [];
+  for (const p of Object.keys(after)) {
+    if (!(p in before)) changes.push("+" + p);
+    else if (before[p] !== after[p]) changes.push("~" + p);
+  }
+  for (const p of Object.keys(before)) if (!(p in after)) changes.push("-" + p);
+  postMessage({ id, status, output: out.join("\\n"), changes, notes });
+};
+`;
+
+let worker, seq = 0;
+const pending = new Map();
+function boot() {
+  const src = new Blob([WORKER_SRC], { type: "text/javascript" });
+  worker = new Worker(URL.createObjectURL(src), { type: "module" });
+  worker.onerror = (e) => console.error("worker error: " + e.message);
+  worker.onmessage = (e) => {
+    const p = pending.get(e.data.id);
+    if (p) { pending.delete(e.data.id); p(e.data); }
+  };
+}
+boot();
+
+function call(msg, timeoutMs) {
+  const id = ++seq;
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      pending.delete(id);
+      worker.terminate();   // Kill: always available, always effective
+      boot();
+      resolve({ status: "timeout", output: `Step exceeded ${timeoutMs / 1000}s and was killed. The interpreter was restarted; variables and files are lost.`, changes: [], notes: [] });
+    }, timeoutMs);
+    pending.set(id, (r) => { clearTimeout(t); resolve(r); });
+    worker.postMessage({ id, ...msg });
+  });
+}
+
+window.seedFiles = (files) => call({ op: "seed", files }, 120000);
+window.runStep = (code, timeoutMs) => call({ op: "run", code }, timeoutMs);
+</script>
+</body>
+</html>

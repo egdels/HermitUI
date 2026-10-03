@@ -31,6 +31,26 @@ Throwaway code, kept in `hermit-agent/spike/`, which gets deleted or folded into
 - [ ] Measure: standalone file size; cold boot time in Chrome, Firefox and Safari if
       available; memory after boot.
 
+**Findings so far** (2026-10-03, `spike/agent_loop.py`: code-as-action loop against
+a local Qwen3.8-27B through llama.cpp, with Pyodide 314.0.7 in a Blob module worker in
+headless Chromium):
+- **`file://` boot is harder than §8 assumes.** Pyodide 314 refuses classic workers
+  ("Classic web workers are not supported"), and on a `file://` page Chromium won't
+  start a Blob module worker at all, and `importScripts()` from a classic Blob worker
+  fails with NetworkError. `fetch()` works in both. The spike is therefore served
+  from `http://127.0.0.1`. The single-file boot is still open.
+- The loop works: all 3 reference task types passed (data processing in 2 steps,
+  calculation in 1 to 4, code plus tests). The model recovered from its own errors.
+- Prompt gaps: the model tried `subprocess` to run unittest (Emscripten has no
+  processes). §5.3 should say "no subprocess; run tests in-process".
+- **Stale modules in the persistent namespace:** after the agent edited
+  `test_roman.py`, re-running the tests used the old import from `sys.modules`. That
+  cost 3 steps, and the task hit the 10-step limit just as the tests went green. The
+  harness should drop changed workspace modules from `sys.modules` after each step
+  (§4.2).
+- llama.cpp returns the reasoning in `reasoning_content`, not inline `<think>`, so
+  the timeline must read both.
+
 **Exit criteria:**
 - Pyodide boots offline from a single file in at least Chrome and Firefox.
 - Kill & re-seed works.
