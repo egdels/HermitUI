@@ -120,6 +120,10 @@ print(len(rows), total)
             final("Done. I wrote **out/summary.txt** with the totals."),
             final("Follow-up done."),
         ],
+        "E2E-AUTO": [
+            py('import os\nos.remove("data.csv")\nprint("gone")'),
+            final("Removed it."),
+        ],
         "E2E-APPROVE": [
             py('print("original")'),
             py("while True:\n    pass"),
@@ -162,10 +166,21 @@ def workspace(page):
     return page.evaluate("() => [...WS.files].map(([p, f]) => [p, f.hash, f.origin]).sort()")
 
 
+def on_pageerror(e):
+    msg = str(e)
+    # Expected under stock Firefox (BiDi reports worker-side log entries as page errors):
+    # the CSP blocking the probes' eval/import, and the forced stop of a killed worker,
+    # which the page itself never sees (verified with page-level error listeners).
+    if "blocked a JavaScript eval" in msg or "blocked a script (script-src-elem)" in msg or msg == "undefined":
+        return
+    FAILS.append("pageerror: " + msg)
+    print("  [pageerror]", msg)
+
+
 def open_app(browser):
     ctx = browser.new_context(accept_downloads=True)
     page = ctx.new_page()
-    page.on("pageerror", lambda e: FAILS.append("pageerror: " + str(e)) or print("  [pageerror]", e))
+    page.on("pageerror", on_pageerror)
     page.goto(APP_URL)
     wait_until(page, "() => PY.state === 'idle'", 120, "interpreter boot")
     return page
@@ -175,7 +190,7 @@ def last_user_msg(state, i=-1):
     return state.requests[i]["messages"][-1]["content"]
 
 
-def risk_scenario(browser, port, state):
+def risk_scenario(browser, port, state, downloads=True):
     print("— risk-based: auto commit, reject + rollback, timeout, network guard, final")
     page = open_app(browser)
     configure(page, port, 5)
@@ -235,6 +250,24 @@ def risk_scenario(browser, port, state):
     for name, verdict in sorted(probes.items()):
         print(f"        {name:38} {verdict}")
 
+    if not downloads:
+        # Playwright can't capture downloads over WebDriver BiDi (stock Firefox), so
+        # the export/import half only runs in Chromium and Playwright's Firefox.
+        page.context.close()
+        return None
+
+    # The file viewer and the workspace-only zip.
+    page.locator('#wsTree [data-path="out/summary.txt"]').click()
+    wait_until(page, "() => document.getElementById('viewerModal').classList.contains('active')", 10, "viewer")
+    check("viewer shows the file", "rows=3 total=300.0" in page.locator("#viewerBody").inner_text())
+    page.click("#viewerClose")
+    with page.expect_download() as dl:
+        page.click("#wsDownloadBtn")
+    wpath = str(pathlib.Path(tempfile.mkdtemp()) / "ws.zip")
+    dl.value.save_as(wpath)
+    wz = zipfile.ZipFile(wpath)
+    check("workspace zip holds exactly the workspace", sorted(wz.namelist()) == ["data.csv", "out/summary.txt"] and wz.read("data.csv") == DATA_CSV, wz.namelist())
+
     # Export with checkpoints; the API key must not be anywhere in it.
     with page.expect_download() as dl:
         page.click("#exportBtn")
@@ -289,6 +322,13 @@ def import_scenario(browser, port, state, zpath, snapshot, files_before):
     wait_until(page, "() => S.timeline.length === 2 && PY.state === 'idle'", 60, "rewind to start")
     names = [p for p, h, o in workspace(page)]
     check("rewind to the start restores the uploaded file only", names == ["data.csv"], names)
+
+    # Importing over a non-empty session asks first; Cancel changes nothing.
+    page.set_input_files("#importInput", zpath)
+    wait_until(page, "() => document.getElementById('confirmModal').classList.contains('active')", 15, "confirm-replace")
+    page.click("#confirmCancel")
+    time.sleep(0.5)
+    check("cancelled import leaves the session alone", page.evaluate("() => S.timeline.length") == 2 and [p for p, h, o in workspace(page)] == ["data.csv"])
     page.context.close()
 
 
@@ -331,18 +371,40 @@ def approve_scenario(browser, port, state):
     page.context.close()
 
 
+def autopilot_scenario(browser, port, state):
+    print("— autopilot: even a delete of a user file commits without a hold")
+    page = open_app(browser)
+    configure(page, port, 10)
+    page.select_option("#autonomySelect", "autopilot")
+    page.set_input_files("#wsFileInput", files=[{"name": "data.csv", "mimeType": "text/csv", "buffer": DATA_CSV}])
+    wait_until(page, "() => WS.files.has('data.csv')", 10, "upload")
+    page.fill("#taskInput", "E2E-AUTO: remove data.csv")
+    page.click("#sendBtn")
+    wait_until(page, "() => S.status === 'done'", 60, "final")
+    st = steps(page)
+    check("autopilot committed the delete", st[0]["decision"] == "auto" and workspace(page) == [], (st[0], workspace(page)))
+    check("…but the risk was still recorded", page.evaluate("() => S.timeline.find(t => t.type === 'step').risk.verdict") == "ask")
+    page.context.close()
+
+
 def main():
-    browsers = sys.argv[1:] or ["chromium", "firefox"]
+    browsers = sys.argv[1:] or ["chromium", "firefox"]   # also: firefox=/path/to/stock/firefox
     with sync_playwright() as pw:
         for name in browsers:
             server, port, state = serve({})
             state.scripts.update(scripts(port))
             print(f"== {name} (mock on :{port})")
-            browser = getattr(pw, name).launch()
+            # "firefox=<binary>" drives a stock Firefox over WebDriver BiDi: the network
+            # guard depends on browser behaviour (CSP inheritance into Blob workers), so
+            # Playwright's patched Firefox build alone isn't proof.
+            name, _, exe = name.partition("=")
+            browser = pw.firefox.launch(channel="moz-firefox", executable_path=exe) if exe else getattr(pw, name).launch()
             try:
-                zpath, snapshot, files_before = risk_scenario(browser, port, state)
-                import_scenario(browser, port, state, zpath, snapshot, files_before)
+                exported = risk_scenario(browser, port, state, downloads=not exe)
+                if exported:
+                    import_scenario(browser, port, state, *exported)
                 approve_scenario(browser, port, state)
+                autopilot_scenario(browser, port, state)
             except AssertionError as e:
                 check(f"{name}: scenario completed", False, str(e))
             finally:

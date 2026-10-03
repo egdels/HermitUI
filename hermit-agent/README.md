@@ -2,10 +2,32 @@
 
 *A supervised, sandboxed, ephemeral agent that runs entirely in your browser.*
 
-> **Status: design stage.** This folder has no code yet, only the design and the plan.
-> It is the starting ground for a HermitUI spin-off and is developed here, separately
-> from the main app in [`../src/`](../src/), so it can move fast without destabilising
-> HermitUI.
+> **Status: MVP (v0.1.0).** One self-contained HTML file,
+> [`dist/hermit-agent-standalone.html`](dist/hermit-agent-standalone.html) (≈ 9 MB,
+> Python included). It is developed here, separately from the main app in
+> [`../src/`](../src/), so it can move fast without destabilising HermitUI.
+
+## Try it
+
+1. Start an OpenAI-compatible server that allows browser requests (CORS). For
+   example, llama.cpp: `llama-server -m model.gguf --jinja --port 8080`. Any
+   OpenAI-compatible cloud API works too, but then the task and what the agent
+   prints go to that provider.
+2. Open `dist/hermit-agent-standalone.html`. Double-clicking the file is fine: no
+   server is needed, and Python boots offline in about a second.
+3. Open ⚙️ Settings and set the API Base URL (default `http://localhost:8080/v1`),
+   the model and, if needed, the key. Use **Test Connection** to check them.
+4. Drop files into the workspace, describe the task, and press **Start**.
+
+The agent needs a model that can recover from its own errors. The reference tasks
+pass with Qwen3.8-27B at reasoning effort Low (see [ROADMAP.md](ROADMAP.md)).
+Packages such as numpy or pandas load on demand from the pinned Pyodide CDN, so they
+need a connection; the standard library works fully offline.
+
+Agent code runs in a WebAssembly Python inside the tab. Its network access is
+blocked on a **best-effort** basis: 17 known paths are tested and closed (DESIGN
+§10), but it is a denylist, not a guarantee. Don't put secrets in the workspace that
+you couldn't afford to leak.
 
 ## The idea
 
@@ -34,9 +56,10 @@ What makes it different from CLI agents is that **you can supervise it**:
 
 It is the same brand and the same philosophy: a single HTML file, vanilla JS, no
 persistence, any OpenAI-compatible endpoint. It reuses much of HermitUI's proven
-code: streaming, rendering, think-tag parsing, settings, error hints and the inline
-build machinery. It lives in its own folder with its own future `src/`, `build.py`
-and `tests/`, and may merge back into HermitUI later as a build flavor or a mode.
+code: streaming, think-tag parsing, settings, error hints and the inline build
+machinery (the list is in [AGENTS.md](AGENTS.md)). It lives in its own folder with
+its own `src/`, `build.py` and `tests/`, and may merge back into HermitUI later as a
+build flavor or a mode.
 See [DESIGN.md §11](DESIGN.md#11-project-layout--merge-path).
 
 ## Documents
@@ -45,4 +68,6 @@ See [DESIGN.md §11](DESIGN.md#11-project-layout--merge-path).
 |---|---|
 | [DESIGN.md](DESIGN.md) | The full design: supervision model, session import/export, architecture, agent loop, security, packaging |
 | [ROADMAP.md](ROADMAP.md) | Phases with checklists and exit criteria, from the first spike to the merge decision |
-| [AGENTS.md](AGENTS.md) | Rules for anyone (human or AI) working in this folder |
+| [AGENTS.md](AGENTS.md) | Rules for anyone (human or AI) working in this folder, build & test commands |
+| [REVIEW_NOTES.md](REVIEW_NOTES.md) | Decisions taken during the unattended MVP build, waiting for a review |
+| [tests/README.md](tests/README.md) | What the unit, end-to-end and real-model tests cover |

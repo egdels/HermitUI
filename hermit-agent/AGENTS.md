@@ -8,9 +8,21 @@ explicitly overrides it. If you are an AI agent, read the root file first.
 > `CLAUDE.md -> AGENTS.md` symlink can be created here; don't commit it.
 
 ## Status
-Design stage. The source of truth is [DESIGN.md](DESIGN.md), and the current phase is
-in [ROADMAP.md](ROADMAP.md). If an implementation needs to deviate from the design,
-update DESIGN.md in the same commit.
+Phase 1 (MVP) is built: `src/` → `build.py` → `dist/hermit-agent-standalone.html`. The
+source of truth is [DESIGN.md](DESIGN.md), and the current phase is in
+[ROADMAP.md](ROADMAP.md). If an implementation needs to deviate from the design, update
+DESIGN.md in the same commit. Open decisions taken during the unattended MVP build are
+listed in [REVIEW_NOTES.md](REVIEW_NOTES.md).
+
+## Build & test
+```bash
+python3 build.py                                   # → dist/hermit-agent-standalone.html
+node tests/run.mjs                                 # unit tests (pure logic)
+../benchmark/.venv/bin/python tests/e2e_agent.py   # e2e vs. a mock endpoint, Chromium + Firefox
+../benchmark/.venv/bin/python tests/e2e_reference.py --base-url http://localhost:8080/v1   # real model
+```
+See [tests/README.md](tests/README.md). The page's CSP blocks `eval`, so Playwright's
+`wait_for_function` can't run inside it: poll with `page.evaluate` instead.
 
 ## Inherited from the root (unchanged)
 - **The single HTML file is the deliverable.** Split sources are assembled by a
@@ -54,4 +66,14 @@ update DESIGN.md in the same commit.
 ## Copied from HermitUI
 | Function / block | From (`../src/…`) | Source commit | Adapted how |
 |---|---|---|---|
-| *(none yet)* | | | |
+| `escapeHtml`, `gunzipToBytes`, `createThrottle`, `parseThinkSegments` | `script.js` | `28483fc` | unchanged |
+| `apiEndpoint`, `normalizeApiUrl`, `apiRoot`, `CLOUD_PROVIDERS`, `detectCloudProvider`, `isLocalEndpoint`, `describeRemoteEndpoint`, `isBlockedMixedContent` | `script.js` | `28483fc` | unchanged (example URL in the error text says :8080) |
+| `chatErrorHint` | `script.js` | `28483fc` | wllama branch dropped; context-overflow advice says "rewind" |
+| `parseReasoningTemplateSupport`, `REASONING_PARAM_KEYS`, `looksLikeReasoningRejection` | `script.js` | `28483fc` | unchanged |
+| `buildReasoningParams` | `script.js` | `28483fc` | remote backend only (no wllama kwargs path) |
+| `probeReasoningSupport` | `script.js` | `28483fc` | returns levels only; runs automatically before the first request |
+| `fetchAndStreamChat` → `streamChat` | `script.js` | `28483fc` | API path only; returns `{finishReason, usage}` instead of callbacks; strip-and-retry of reasoning params kept |
+| Test Connection handler → `testConnection` | `script.js` | `28483fc` | no vision detection; also probes reasoning support |
+| `showToast` | `script.js` | `28483fc` | unchanged |
+| `tests/check.mjs`, `tests/run.mjs`, the `extract.mjs` approach | `../tests/` | `28483fc` | extractor also slices `async function`s |
+| `build.py` techniques (SRI-verified downloads, gzip+base64 inlining, `</script` escaping, Inter woff2 inlining) | `../build.py` | `28483fc` | rewritten for one output; Pyodide pinned by sha256; CSP swapped for a strict one |

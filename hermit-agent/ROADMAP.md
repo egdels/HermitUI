@@ -23,10 +23,15 @@ Throwaway code, kept in `hermit-agent/spike/`, which gets deleted or folded into
 - [ ] Confirm `setInterruptBuffer` is unusable on `file://` and on GitHub Pages
       (`crossOriginIsolated === false`). *`file://` confirmed in Chromium and
       Firefox; GitHub Pages not yet checked.*
-- [ ] **Network blocking** (§10): try removing the worker globals, a CSP via `<meta>`,
+- [x] **Network blocking** (§10): try removing the worker globals, a CSP via `<meta>`,
       and a CSP inserted at runtime. Try to exfiltrate from Python with `pyfetch`,
       `js.fetch`, `js.XMLHttpRequest`, `js.WebSocket`, `js.eval("import(...)")` and
       nested `js.Worker`. Write down exactly what each approach blocks.
+      *Answered by the MVP rather than a separate spike: replaced globals plus a static
+      `<meta>` CSP, with 17 probes in `tests/e2e_agent.py`, all blocked in Chromium
+      and Firefox (DESIGN §10, "As built and measured"). A CSP inserted at runtime
+      was not tried: the static one turned out to be enough, since `connect-src`
+      stays open anyway.*
 - [x] Load one package (numpy) on demand from the CDN, held in memory only, with no
       OPFS or IndexedDB use. Check DevTools → Application → Storage.
 - [x] Measure: standalone file size; cold boot time in Chrome, Firefox and Safari if
@@ -133,27 +138,27 @@ headless Chromium):
 
 Scaffold the folder per §11 (`src/`, `build.py`, `tests/`, `dist/`), then:
 
-- [ ] **Settings & connection:** base URL, model, API key (memory only), Test
+- [x] **Settings & connection:** base URL, model, API key (memory only), Test
       Connection. Copied from HermitUI and listed in AGENTS.md.
-- [ ] **Agent loop:** code-as-action parsing, observation envelope, truncation, step
+- [x] **Agent loop:** code-as-action parsing, observation envelope, truncation, step
       limit, per-step timeout, final answer and `ask:` handling (§5).
-- [ ] **Worker runner:** persistent namespace, stdout/stderr capture, workspace
+- [x] **Worker runner:** persistent namespace, stdout/stderr capture, workspace
       diffing (§4.2).
-- [ ] **Step timeline:** reasoning (think blocks), code, output, effect, verdict
+- [x] **Step timeline:** reasoning (think blocks), code, output, effect, verdict
       (§2.1).
-- [ ] **Workspace panel:** tree, highlights, viewer, upload (files and folders),
+- [x] **Workspace panel:** tree, highlights, viewer, upload (files and folders),
       download.
-- [ ] **Effect-based gating:** file origins, classification table, approve / edit /
+- [x] **Effect-based gating:** file origins, classification table, approve / edit /
       reject, rollback plus interpreter restart on reject (§2.3).
-- [ ] **Autonomy levels:** approve-each / risk-based (default) / autopilot. Stop and
+- [x] **Autonomy levels:** approve-each / risk-based (default) / autopilot. Stop and
       Kill.
-- [ ] **Checkpoints & rewind:** content-addressed store, rewind to step N (§2.4).
-- [ ] **Session export/import:** zip writer and reader, full and workspace-only
+- [x] **Checkpoints & rewind:** content-addressed store, rewind to step N (§2.4).
+- [x] **Session export/import:** zip writer and reader, full and workspace-only
       export, import validation, paused restore, confirm-replace (§3).
-- [ ] **Tests:** unit tests (parsers, classifier, zip round-trip, session schema)
+- [x] **Tests:** unit tests (parsers, classifier, zip round-trip, session schema)
       and one e2e test that scripts a short session against a mock OpenAI endpoint,
       then does export → reload → import.
-- [ ] `dist/hermit-agent-standalone.html` builds and is committed.
+- [x] `dist/hermit-agent-standalone.html` builds and is committed.
 
 **Exit criteria:**
 - A real remote model completes three reference tasks, one each for data processing,
@@ -161,6 +166,29 @@ Scaffold the folder per §11 (`src/`, `build.py`, `tests/`, `dist/`), then:
 - A rejected delete is rolled back correctly.
 - Export → import round-trips a session including checkpoints.
 - All tests are green.
+
+**Result (2026-10-03): all four met.**
+- `tests/e2e_reference.py` against Qwen3.8-27B (IQ4_XS, llama.cpp, reasoning effort
+  Low), risk-based, in the built file in headless Chromium, passed all three tasks:
+  data processing (3 steps, 14 s), code plus tests (4 steps, 42 s; 11 unittest
+  tests run in-process), and calculation (2 steps, 5 s; 142913828922). No step
+  needed approval: none touched a user file.
+- `tests/e2e_agent.py` (mock endpoint) runs in Chromium 149 and Playwright's
+  Firefox 151, and in stock Firefox 157 without the download-based parts, which
+  Playwright can't capture over BiDi. It covers: a rejected delete of a user file
+  rolled back with the interpreter restarted; timeout; Kill; edit-before-run;
+  guidance; reject-before-run; 17 network probes, all blocked; the file viewer;
+  the workspace zip; export (valid for Python's `zipfile`, no API key inside) →
+  fresh page → import (timeline and workspace identical) → follow-up → rewind to a
+  step and to the start (worker re-seeded, variables gone); and confirm-before-
+  replace on import.
+- `node tests/run.mjs`: 135 assertions over reply parsing, observations, diffing,
+  risk classification, zip and session archive (tampering included).
+
+What the MVP does *not* have yet, beyond Phase 2's list: drag-drop and folder upload
+are wired but only tested by hand (not in e2e); there is no per-file text diff (a
+chip opens the new or old version); and no mobile pass beyond flex wrapping.
+Decisions taken without the owner are in [REVIEW_NOTES.md](REVIEW_NOTES.md).
 
 ---
 

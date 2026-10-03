@@ -888,7 +888,9 @@ function startWorker() {
         if (d.ok) p.resolve(d.result);
         else p.reject(new Error(typeof d.error === "string" ? d.error.slice(0, 2000) : "worker error"));
     };
-    w.onerror = (e) => { if (gen === PY.gen) console.error("worker error:", e.message); };
+    // An error from a worker that is being killed is expected; don't let it surface as
+    // an uncaught page error.
+    w.onerror = (e) => { e.preventDefault(); if (gen === PY.gen) console.error("worker error:", e.message); };
     return w;
 }
 
@@ -1323,7 +1325,18 @@ async function runLoop() {
         // A bug or a malformed worker answer: show it rather than leave the loop hanging.
         console.error("agent loop failed:", e);
         const last = S.timeline[S.timeline.length - 1];
-        if (last && last.type === "step" && last.phase !== "done") { last.phase = "done"; last.status = last.status || "crashed"; }
+        if (last && last.type === "step" && last.phase !== "done") {
+            last.phase = "done";
+            last.status = last.status || "crashed";
+            // The worker may hold changes that never reached the canonical workspace:
+            // start it fresh. And answer the code turn, so the history stays well-formed
+            // for Retry.
+            restartInterpreter();
+            const lastMsg = S.messages[S.messages.length - 1];
+            if (lastMsg && lastMsg.role === "assistant" && last.kind === "code") {
+                S.messages.push({ role: "user", content: buildObservation({ step: last.n, status: "error", notes: ["The harness failed while handling this step (" + (e.message || e) + "). Nothing was committed, and the interpreter was restarted: variables are lost, files are as they were before this step."] }) });
+            }
+        }
         addTimelineItem({ type: "error", text: e.message || String(e), hint: "The step was not committed. Press Retry to ask the model again." });
         setStatus("error");
     } finally {
@@ -1729,6 +1742,7 @@ function buildStepCard(item, idx, old) {
     if (item.decision) head.appendChild(el("span", "badge verdict-" + item.decision.replace(/\W+/g, "-"), (VERDICT_LABELS[item.decision] || item.decision) + (item.decidedBy === "user" && item.decision !== "auto" ? " by you" : "")));
     if (item.phase === "thinking") head.appendChild(el("span", "badge live", "streaming…"));
     if (item.phase === "running") head.appendChild(el("span", "badge live", "running…"));
+    if (item.phase === "pending-run" || item.phase === "pending-approval") head.appendChild(el("span", "badge waiting", "⏸ waiting for you"));
     card.appendChild(head);
 
     const think = renderThink(item, old, item.phase === "thinking" && !item.content);

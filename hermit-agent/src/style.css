@@ -244,6 +244,7 @@ button, select, input, textarea { font: inherit; color: inherit; }
     white-space: nowrap;
 }
 .badge.live { color: var(--primary); border-color: var(--primary); animation: pulse 1.6s ease-in-out infinite; }
+.badge.waiting { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 .badge.status-ok { color: var(--ok); background: var(--ok-bg); }
 .badge.status-error, .badge.status-timeout, .badge.status-killed, .badge.status-crashed { color: var(--danger); background: var(--danger-bg); }
@@ -504,3 +505,7 @@ pre.output.is-error { border-color: var(--danger); }
 :root[data-theme="dark"] .hljs-comment { color: #6b7280; }
 :root[data-theme="dark"] .hljs-number, :root[data-theme="dark"] .hljs-literal { color: #fbbf24; }
 :root[data-theme="dark"] .hljs-title, :root[data-theme="dark"] .hljs-title.function_ { color: #c4b5fd; }
+:root[data-theme="dark"] .hljs-subst, :root[data-theme="dark"] .hljs-params, :root[data-theme="dark"] .hljs-variable,
+:root[data-theme="dark"] .hljs-attr, :root[data-theme="dark"] .hljs-attribute, :root[data-theme="dark"] .hljs-name,
+:root[data-theme="dark"] .hljs-tag, :root[data-theme="dark"] .hljs-type, :root[data-theme="dark"] .hljs-property { color: #e5e7eb; }
+:root[data-theme="dark"] .hljs-meta, :root[data-theme="dark"] .hljs-symbol, :root[data-theme="dark"] .hljs-selector-class { color: #67e8f9; }
