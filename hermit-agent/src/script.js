@@ -1865,18 +1865,48 @@ function buildCard(item, idx, old) {
     return card;
 }
 
-function renderTimelineItem(idx, scroll) {
+// While a reply streams, the card is patched in place: rebuilding it on every chunk
+// replayed its entry animation and reset the reasoning box's scroll position, which
+// made the timeline flicker.
+function patchStreamingCard(card, item) {
+    const thinking = !item.content;
+    const think = card.querySelector(":scope > details.think-block");
+    if (item.reasoning) {
+        if (!think) return false;   // first reasoning chunk: rebuild once to create the box
+        const box = think.querySelector(".think-content");
+        const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+        if (box.textContent !== item.reasoning) box.textContent = item.reasoning;
+        if (atBottom) box.scrollTop = box.scrollHeight;
+        think.classList.toggle("thinking-active", thinking);
+        think.querySelector("summary").textContent = thinking ? "🧠 Thinking…" : `🧠 Reasoning (${item.reasoning.length.toLocaleString()} chars)`;
+    }
+    const md = card.querySelector(":scope > .markdown");
+    if (item.content) {
+        const fresh = renderMarkdown(item.content);
+        if (md) md.replaceWith(fresh); else card.appendChild(fresh);
+    }
+    return true;
+}
+
+// isNew: the item was just added, so its card gets the entry animation. Re-renders of
+// an existing card never animate.
+function renderTimelineItem(idx, isNew) {
     const tl = $("timeline");
     const item = S.timeline[idx];
     if (!tl || !item) return;
     const old = tl.querySelector(`[data-idx="${idx}"]`);
-    const card = buildCard(item, idx, old);
-    card.dataset.idx = idx;
     const nearBottom = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 120;
-    if (old) old.replaceWith(card);
-    else tl.appendChild(card);
+    const phase = item.type === "step" ? item.phase || "" : "";
+    if (!(old && phase === "thinking" && old.dataset.phase === "thinking" && patchStreamingCard(old, item))) {
+        const card = buildCard(item, idx, old);
+        card.dataset.idx = idx;
+        card.dataset.phase = phase;
+        if (isNew && !old) card.classList.add("is-new");
+        if (old) old.replaceWith(card);
+        else tl.appendChild(card);
+    }
     $("emptyState")?.remove();
-    if (scroll || nearBottom) tl.scrollTop = tl.scrollHeight;
+    if (isNew || nearBottom) tl.scrollTop = tl.scrollHeight;
 }
 
 function renderTimeline() {

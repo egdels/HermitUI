@@ -7,6 +7,7 @@ probes in the e2e test aim at: a non-empty `exfil` list means something got out.
 """
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -90,6 +91,8 @@ def make_handler(state):
                     d["usage"] = usage
                 self.wfile.write(b"data: " + json.dumps(d).encode() + b"\n\n")
                 self.wfile.flush()
+                if reply.get("delay"):
+                    time.sleep(reply["delay"])   # stream slowly, like a real model
 
             reasoning = reply.get("reasoning", "")
             content = reply.get("content", "")

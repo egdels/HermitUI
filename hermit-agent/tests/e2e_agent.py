@@ -120,6 +120,10 @@ print(len(rows), total)
             final("Done. I wrote **out/summary.txt** with the totals."),
             final("Follow-up done."),
         ],
+        "E2E-STREAM": [
+            {"reasoning": "".join(f"Thought {i}: weighing the options carefully. " for i in range(120)),
+             "content": "Streamed answer. " * 30, "delay": 0.02},
+        ],
         "E2E-AUTO": [
             py('import os\nos.remove("data.csv")\nprint("gone")'),
             final("Removed it."),
@@ -371,6 +375,31 @@ def approve_scenario(browser, port, state):
     page.context.close()
 
 
+def streaming_scenario(browser, port, state):
+    print("— streaming: the card is patched in place, not rebuilt (no flicker)")
+    page = open_app(browser)
+    configure(page, port, 10)
+    page.fill("#taskInput", "E2E-STREAM: think out loud")
+    page.click("#sendBtn")
+    wait_until(page, "() => !!document.querySelector('.step-card .think-content')", 30, "reasoning box")
+    page.evaluate("""() => {
+        window.__card = document.querySelector('.step-card');
+        window.__box = window.__card.querySelector('.think-content');
+        window.__len = window.__box.textContent.length;
+        window.__rebuilt = 0;
+        new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes)
+            if (n.classList && n.classList.contains('step-card')) window.__rebuilt++; })
+            .observe(document.getElementById('timeline'), { childList: true });
+    }""")
+    time.sleep(1.0)
+    r = page.evaluate("""() => ({ thinking: S.timeline[1].phase === 'thinking', sameCard: window.__card.isConnected,
+        sameBox: window.__box.isConnected, grew: window.__box.textContent.length > window.__len, rebuilt: window.__rebuilt })""")
+    check("reasoning streams into the same card and box", r["thinking"] and r["sameCard"] and r["sameBox"] and r["grew"] and r["rebuilt"] == 0, r)
+    wait_until(page, "() => S.status === 'done'", 60, "final")
+    check("re-rendered cards don't replay the entry animation", page.evaluate("() => document.querySelectorAll('#timeline .card.is-new').length") <= 2)
+    page.context.close()
+
+
 def autopilot_scenario(browser, port, state):
     print("— autopilot: even a delete of a user file commits without a hold")
     page = open_app(browser)
@@ -405,6 +434,7 @@ def main():
                     import_scenario(browser, port, state, *exported)
                 approve_scenario(browser, port, state)
                 autopilot_scenario(browser, port, state)
+                streaming_scenario(browser, port, state)
             except AssertionError as e:
                 check(f"{name}: scenario completed", False, str(e))
             finally:
