@@ -343,6 +343,19 @@ pre.output.is-error { border-color: var(--danger); }
 .card-btn.danger:hover { border-color: var(--danger); color: var(--danger); box-shadow: 0 2px 8px var(--danger-bg); }
 .card-btn.ghost { background: transparent; font-size: 0.78rem; padding: 3px 10px; }
 .card-foot { display: flex; justify-content: flex-end; }
+.step-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+}
+.stat-item { display: inline-flex; flex-direction: column; gap: 2px; min-width: 0; cursor: help; }
+.stat-label { font-size: 0.66rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+.stat-value { font-size: 0.8rem; font-weight: 600; color: var(--text-main); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat-meter { display: block; height: 4px; border-radius: 2px; background: var(--border-strong); overflow: hidden; }
+.stat-meter-fill { display: block; height: 100%; border-radius: 2px; background: var(--primary); transition: width 0.3s ease; }
+.stat-meter-fill.is-high { background: var(--warn); }
 .reason-input, .code-edit {
     width: 100%;
     border: 1px solid var(--border-strong);

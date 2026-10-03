@@ -171,4 +171,49 @@ section("13. sha256 — WebCrypto and the JS fallback agree");
     }
 }
 
+section("14. Step stats — server figures first, our clock as the fallback");
+{
+    const clock = { startMs: 1000, firstMs: 1800, endMs: 5800 };
+    // llama.cpp: usage plus its own timings.
+    let st = X.buildStepStats(
+        { prompt_tokens: 4200, completion_tokens: 401, prompt_tokens_details: { cached_tokens: 3900 } },
+        { cache_n: 3900, prompt_n: 300, prompt_per_second: 812.44, predicted_n: 401, predicted_per_second: 42.27 },
+        clock, 16384);
+    check("server tok/s wins over the clock", st.tps === 42.3 && st.tpsSource === "server", JSON.stringify(st));
+    check("prompt speed from timings", st.promptTps === 812.4);
+    check("ttft / generation / total from the clock", st.ttftMs === 800 && st.genMs === 4000 && st.totalMs === 4800);
+    check("context = prompt + output against n_ctx", st.ctxUsed === 4601 && st.ctxSize === 16384);
+    check("cached tokens", st.cached === 3900);
+    // Plain OpenAI-style usage, no timings: tok/s from the clock, first token excluded.
+    st = X.buildStepStats({ prompt_tokens: 100, completion_tokens: 201, completion_tokens_details: { reasoning_tokens: 150 } }, null, clock, 0);
+    check("clock tok/s counts n-1 tokens after the first", st.tps === 50 && st.tpsSource === "clock", JSON.stringify(st));
+    check("reasoning tokens from usage details", st.reasoning === 150);
+    check("unknown context size stays 0", st.ctxSize === 0);
+    st = X.buildStepStats(null, { prompt_n: 50, cache_n: 10, predicted_n: 7 }, clock, 0);
+    check("token counts fall back to timings", st.prompt === 60 && st.completion === 7);
+    st = X.buildStepStats(undefined, undefined, { startMs: 0, firstMs: 0, endMs: 900 }, 0);
+    check("no data, no stream: only the total", st.tps === 0 && st.ttftMs === 0 && st.totalMs === 900 && X.formatStepStats(st).length === 1);
+    st = X.buildStepStats({ prompt_tokens: -5, completion_tokens: "9" }, null, clock, NaN);
+    check("garbage numbers become 0", st.prompt === 0 && st.completion === 0 && st.ctxSize === 0);
+
+    const f = X.formatStepStats(X.buildStepStats(
+        { prompt_tokens: 14000, completion_tokens: 1000 }, { predicted_per_second: 42.27 }, { startMs: 0, firstMs: 1250, endMs: 61250 }, 16384));
+    const by = Object.fromEntries(f.map(e => [e.label, e]));
+    check("speed", by.Speed.value === "42.3 tok/s", JSON.stringify(f));
+    check("first token in seconds", by["First token"].value === "1.3 s");
+    check("output", by.Output.value === "1,000 tok");
+    check("context with share and meter", by.Context.value === "15,000 / 16,384 · 92%" && Math.abs(by.Context.meter - 15000 / 16384) < 1e-9);
+    check("inference over a minute", by.Inference.value === "1m 1s");
+    check("missing figures are left out", !by["Prompt speed"]);
+    const total = (ms) => X.formatStepStats({ totalMs: ms })[0].value;
+    check("no '1m 60s' or '60.0 s' at the minute boundaries", total(119600) === "2m 0s" && total(59960) === "1m 0s" && total(59900) === "59.9 s");
+    check("context without a known size has no meter", X.formatStepStats({ ctxUsed: 500 })[0].meter === undefined);
+    check("no stats, no block", X.formatStepStats(null).length === 0);
+
+    const c = X.cleanStepStats({ tps: 12.5, tpsSource: "server", prompt: "9", ctxSize: -1, evil: "<img>" });
+    check("cleanStepStats keeps known numbers only", c.tps === 12.5 && c.tpsSource === "server" && c.prompt === 0 && c.ctxSize === 0 && !("evil" in c));
+    check("cleanStepStats rejects non-objects", X.cleanStepStats("x") === null && X.cleanStepStats([1]) === null && X.cleanStepStats(undefined) === null);
+    check("cleanStepStats drops an unknown speed source", X.cleanStepStats({ tpsSource: "magic" }).tpsSource === "");
+}
+
 report();

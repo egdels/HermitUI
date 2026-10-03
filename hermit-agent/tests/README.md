@@ -26,6 +26,8 @@ the `FUNCS` list with the rename. Only DOM-free code can be covered this way.
     `makeFence`.
   - The helpers copied from HermitUI: reasoning params and chat error hints.
   - The prompts, and that the JS sha256 fallback matches WebCrypto.
+  - The per-step model stats: `buildStepStats` (server `timings` over the page
+    clock, token fallbacks, garbage input), `formatStepStats`, `cleanStepStats`.
 - **`archive.test.mjs`** covers:
   - CRC32, and the zip round-trip (binary, unicode names, empty files).
   - The untrusted-input rules: traversal, absolute and backslash paths, CRC
@@ -61,7 +63,8 @@ scenarios:
 3. **Approve each step**: edit before run, a guidance note, Kill, and reject before
    run, each checked against what the model is told.
 4. **Autopilot**: a delete of a user file commits without a hold, but the risk is
-   still recorded.
+   still recorded. Every step card shows its stats block, with the mock's llama.cpp
+   `timings` and the context size from its `/props`.
 
 Stock Firefox (`firefox=<binary>`, driven over WebDriver BiDi) runs everything except
 the download-based checks, which Playwright can't capture over BiDi. It matters

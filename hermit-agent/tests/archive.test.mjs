@@ -166,6 +166,9 @@ section("5. validateSession");
     check("fields coerced to their types", v.timeline[0].output === "42" && JSON.stringify(v.timeline[0].notes) === '["a"]');
     check("unsafe or invalid origins dropped", JSON.stringify(v.origins) === '{"ok.txt":"agent"}');
     check("defaults filled in", v.status === "paused" && v.settings.autonomy === "risk" && v.settings.stepLimit === 20);
+    const w = X.validateSession({ ...base, timeline: [{ type: "step", n: 1, stats: { tps: 40, ctxUsed: 900, html: "<b>" } }, { type: "step", n: 2 }] });
+    check("step stats survive import, cleaned", w.timeline[0].stats.tps === 40 && w.timeline[0].stats.ctxUsed === 900 && !("html" in w.timeline[0].stats));
+    check("a step without stats imports with none", w.timeline[1].stats === null);
 }
 
 report();

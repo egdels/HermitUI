@@ -435,6 +435,12 @@ def autopilot_scenario(browser, port, state):
     st = steps(page)
     check("autopilot committed the delete", st[0]["decision"] == "auto" and workspace(page) == [], (st[0], workspace(page)))
     check("…but the risk was still recorded", page.evaluate("() => S.timeline.find(t => t.type === 'step').risk.verdict") == "ask")
+    stats = page.evaluate("""() => [...document.querySelectorAll('.step-card .step-stats')].map(b =>
+        Object.fromEntries([...b.querySelectorAll('.stat-item')].map(i => [i.querySelector('.stat-label').textContent, i.querySelector('.stat-value').textContent])))""")
+    check("every step card shows its stats block", len(stats) == len(st) and len(st) > 0, stats)
+    first = stats[0] if stats else {}
+    check("…with the server's tok/s and the context size from /props",
+          first.get("Speed") == "33.3 tok/s" and first.get("Context") == "120 / 4,096 · 3%" and first.get("Prompt") == "100 tok · 60 cached", first)
     page.context.close()
 
 

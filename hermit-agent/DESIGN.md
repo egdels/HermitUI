@@ -51,6 +51,14 @@ This is the core of the product. Everything else serves it.
   4. **Effect:** files created, modified or deleted, with a per-file diff on click.
   5. **Verdict:** a badge showing auto-committed, approved, edited & approved, or
      rejected, plus who decided.
+  6. **Model stats:** a footer row for that step's model request: generation speed
+     (tok/s), time to first token, output and prompt tokens (reasoning and cached
+     counts when reported), prompt speed, context used against the context size
+     (with a fill bar) and total inference time. Server-measured figures (llama.cpp's
+     `timings`) win over the page's clock; the context size comes from llama.cpp's
+     `/props` and is left out when the endpoint doesn't expose it. Figures the server
+     didn't report are omitted, never shown as 0. The stats are part of the session
+     export and are re-validated on import.
 - **Workspace panel (side).** A file tree of the virtual file system. Files changed
   in the latest step are highlighted. Clicking a file opens a viewer: text with
   highlighting, image previews, or hex/size info for other binaries. Files can be

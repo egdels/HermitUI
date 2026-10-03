@@ -57,6 +57,8 @@ def make_handler(state):
         def do_GET(self):
             if self.record_exfil():
                 return self.send_json(200, {"got": "it"})
+            if self.path == "/props":   # llama.cpp's: context size only, no template
+                return self.send_json(200, {"default_generation_settings": {"n_ctx": 4096}})
             if self.path.endswith("/models"):
                 return self.send_json(200, {"data": [{"id": "mock-model"}]})
             self.send_json(404, {"error": {"message": "not found"}})
@@ -85,10 +87,12 @@ def make_handler(state):
             self.send_header("Connection", "close")
             self.end_headers()
 
-            def chunk(delta, finish=None, usage=None):
+            def chunk(delta, finish=None, usage=None, timings=None):
                 d = {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
                 if usage:
                     d["usage"] = usage
+                if timings:
+                    d["timings"] = timings
                 self.wfile.write(b"data: " + json.dumps(d).encode() + b"\n\n")
                 self.wfile.flush()
                 if reply.get("delay"):
@@ -100,7 +104,8 @@ def make_handler(state):
                 chunk({"reasoning_content": reasoning[i:i + 40]})
             for i in range(0, len(content), 40):
                 chunk({"content": content[i:i + 40]})
-            chunk({}, reply.get("finish", "stop"), {"prompt_tokens": 100, "completion_tokens": 20})
+            chunk({}, reply.get("finish", "stop"), {"prompt_tokens": 100, "completion_tokens": 20},
+                  {"cache_n": 60, "prompt_n": 40, "prompt_per_second": 500.0, "predicted_n": 20, "predicted_per_second": 33.3})
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
             self.close_connection = True

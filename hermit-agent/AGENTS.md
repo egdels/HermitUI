@@ -71,8 +71,8 @@ See [tests/README.md](tests/README.md). The page's CSP blocks `eval`, so Playwri
 | `chatErrorHint` | `script.js` | `28483fc` | wllama branch dropped; context-overflow advice says "rewind" |
 | `parseReasoningTemplateSupport`, `REASONING_PARAM_KEYS`, `looksLikeReasoningRejection` | `script.js` | `28483fc` | unchanged |
 | `buildReasoningParams` | `script.js` | `28483fc` | remote backend only (no wllama kwargs path) |
-| `probeReasoningSupport` | `script.js` | `28483fc` | returns levels only; runs automatically before the first request |
-| `fetchAndStreamChat` → `streamChat` | `script.js` | `28483fc` | API path only; returns `{finishReason, usage}` instead of callbacks; strip-and-retry of reasoning params kept |
+| `probeReasoningSupport` | `script.js` | `28483fc` | returns levels plus llama.cpp's `n_ctx` (for the step stats); runs automatically before the first request |
+| `fetchAndStreamChat` → `streamChat` | `script.js` | `28483fc` | API path only; returns `{finishReason, usage, rawUsage, timings, clock}` instead of callbacks; strip-and-retry of reasoning params kept |
 | Test Connection handler → `testConnection` | `script.js` | `28483fc` | no vision detection; also probes reasoning support |
 | `showToast` | `script.js` | `28483fc` | unchanged |
 | `tests/check.mjs`, `tests/run.mjs`, the `extract.mjs` approach | `../tests/` | `28483fc` | extractor also slices `async function`s |

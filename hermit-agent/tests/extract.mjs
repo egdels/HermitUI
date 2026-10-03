@@ -30,7 +30,7 @@ function constDecl(name) {
     return m[0].trim();
 }
 
-const CONSTS = ["FILE_EXTENSIONS", "APP_VERSION", "SESSION_FORMAT", "SESSION_FORMAT_VERSION", "LIMITS", "CLOUD_PROVIDERS", "REASONING_PARAM_KEYS", "CRC_TABLE"];
+const CONSTS = ["FILE_EXTENSIONS", "APP_VERSION", "SESSION_FORMAT", "SESSION_FORMAT_VERSION", "LIMITS", "CLOUD_PROVIDERS", "REASONING_PARAM_KEYS", "CRC_TABLE", "STEP_STAT_KEYS"];
 const FUNCS = [
     "escapeHtml", "createThrottle", "parseThinkSegments", "apiEndpoint", "normalizeApiUrl", "apiRoot",
     "detectCloudProvider", "isLocalEndpoint", "describeRemoteEndpoint", "chatErrorHint",
@@ -38,6 +38,7 @@ const FUNCS = [
     "buildSystemPrompt", "formatBytes", "buildTaskMessage", "splitReply", "parseReply", "truncateOutput",
     "diffListings", "formatChanges", "classifyEffect", "buildObservation", "appendToLastUserMessage",
     "isSafeRelPath", "normalizeUploadPath", "makeFence", "filenameCommentHint", "missingMentionedFiles",
+    "buildStepStats", "cleanStepStats", "formatStepStats",
     "crc32", "streamThrough", "sha256Hex", "sha256HexJs", "zipWrite", "zipRead", "cleanForExport",
     "transcriptMarkdown", "buildSessionArchive", "validateManifest", "validateSession", "parseSessionArchive",
 ];

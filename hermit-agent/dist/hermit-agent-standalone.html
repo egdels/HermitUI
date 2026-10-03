@@ -1953,6 +1953,19 @@ pre.output.is-error { border-color: var(--danger); }
 .card-btn.danger:hover { border-color: var(--danger); color: var(--danger); box-shadow: 0 2px 8px var(--danger-bg); }
 .card-btn.ghost { background: transparent; font-size: 0.78rem; padding: 3px 10px; }
 .card-foot { display: flex; justify-content: flex-end; }
+.step-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+}
+.stat-item { display: inline-flex; flex-direction: column; gap: 2px; min-width: 0; cursor: help; }
+.stat-label { font-size: 0.66rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+.stat-value { font-size: 0.8rem; font-weight: 600; color: var(--text-main); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat-meter { display: block; height: 4px; border-radius: 2px; background: var(--border-strong); overflow: hidden; }
+.stat-meter-fill { display: block; height: 100%; border-radius: 2px; background: var(--primary); transition: width 0.3s ease; }
+.stat-meter-fill.is-high { background: var(--warn); }
 .reason-input, .code-edit {
     width: 100%;
     border: 1px solid var(--border-strong);
@@ -3385,6 +3398,7 @@ function validateSession(raw) {
                     ? { added: fileList(it.changes.added), modified: fileList(it.changes.modified, true), deleted: fileList(it.changes.deleted, true) }
                     : null;
                 s.risk = it.risk && typeof it.risk === "object" ? { verdict: str(it.risk.verdict), reasons: strArr(it.risk.reasons) } : null;
+                s.stats = cleanStepStats(it.stats);
                 // Nothing restores mid-flight: a step that was waiting or running when the
                 // session was exported is shown as interrupted.
                 if (s.phase && s.phase !== "done") { s.phase = "done"; s.status = s.status || "interrupted"; }
@@ -3647,9 +3661,13 @@ async function runInWorker(code, opts) {
 
 // ========== 6. LLM streaming (adapted from HermitUI's fetchAndStreamChat) ==========
 // Streams one chat completion. onDelta(reasoning, content) fires per chunk. Resolves to
-// { finishReason, usage }; rejects on HTTP/network errors and AbortError.
+// { finishReason, usage, rawUsage, timings, clock }; rejects on HTTP/network errors and
+// AbortError. rawUsage/timings are the server's own objects (timings: llama.cpp only),
+// clock holds performance.now() stamps for the request, first token and end.
 async function streamChat(payload, signal, onDelta) {
     let promptTokens = 0, completionTokens = 0, finishReason = null, sawStreamData = false;
+    let rawUsage = null, timings = null;
+    const clock = { startMs: performance.now(), firstMs: 0, endMs: 0 };
     const chatUrl = apiEndpoint(SETTINGS.apiUrl, "/chat/completions");
     const postChat = (body) => fetch(chatUrl, {
         method: "POST",
@@ -3681,13 +3699,16 @@ async function streamChat(payload, signal, onDelta) {
     const decoder = new TextDecoder("utf-8");
     let buffer = "", rawBody = "";
     const readUsage = (data) => {
+        if (data.timings && typeof data.timings === "object") timings = data.timings;
         if (!data.usage) return;
+        rawUsage = data.usage;
         promptTokens = data.usage.prompt_tokens || promptTokens;
         completionTokens = data.usage.completion_tokens || completionTokens;
     };
     const emit = (reasoning, content) => {
         if (!reasoning && !content) return;
         sawStreamData = true;
+        if (!clock.firstMs) clock.firstMs = performance.now();
         onDelta(reasoning || "", content || "");
     };
     const raiseIfError = (data) => {
@@ -3737,27 +3758,99 @@ async function streamChat(payload, signal, onDelta) {
             if (msg) emit(msg.reasoning_content || msg.reasoning || msg.thinking || "", msg.content);
         }
     }
-    return { finishReason, usage: { prompt: promptTokens, completion: completionTokens }, sawData: sawStreamData };
+    clock.endMs = performance.now();
+    return { finishReason, usage: { prompt: promptTokens, completion: completionTokens }, rawUsage, timings, clock, sawData: sawStreamData };
+}
+
+// ---------- Per-step inference stats ----------
+const STEP_STAT_KEYS = ["prompt", "completion", "reasoning", "cached", "ttftMs", "genMs", "totalMs", "tps", "promptTps", "ctxUsed", "ctxSize"];
+
+// One step's stats from what the server reported plus our own clock. Server-measured
+// speeds (llama.cpp `timings`) win over ours, which include network and queueing.
+// usage: the raw OpenAI `usage` object; nCtx: the context size, 0 when unknown.
+function buildStepStats(usage, timings, clock, nCtx) {
+    const n = (v) => (Number.isFinite(v) && v > 0 ? v : 0);
+    const r1 = (v) => Math.round(v * 10) / 10;
+    const u = usage || {}, t = timings || {}, c = clock || {};
+    const prompt = n(u.prompt_tokens) || n(t.prompt_n) + n(t.cache_n);
+    const completion = n(u.completion_tokens) || n(t.predicted_n);
+    const ttftMs = c.firstMs ? n(c.firstMs - c.startMs) : 0;
+    const genMs = c.firstMs ? n(c.endMs - c.firstMs) : 0;
+    let tps = n(t.predicted_per_second), tpsSource = tps ? "server" : "";
+    // The first token arrives at firstMs, so n-1 tokens fill the time after it.
+    if (!tps && completion > 1 && genMs > 0) { tps = (completion - 1) / (genMs / 1000); tpsSource = "clock"; }
+    return {
+        prompt, completion,
+        reasoning: n(u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens),
+        cached: n(u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || n(t.cache_n),
+        ttftMs: Math.round(ttftMs), genMs: Math.round(genMs), totalMs: Math.round(n(c.endMs - c.startMs)),
+        tps: r1(tps), tpsSource, promptTps: r1(n(t.prompt_per_second)),
+        ctxUsed: prompt + completion, ctxSize: n(nCtx),
+    };
+}
+
+// Imported stats are untrusted: known numeric keys only, anything else dropped.
+function cleanStepStats(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const out = {};
+    for (const k of STEP_STAT_KEYS) out[k] = Number.isFinite(raw[k]) && raw[k] > 0 ? raw[k] : 0;
+    out.tpsSource = raw.tpsSource === "server" || raw.tpsSource === "clock" ? raw.tpsSource : "";
+    return out;
+}
+
+// The stat block's entries: [{ label, value, title, meter? }]. Figures the server didn't
+// report are left out rather than shown as 0.
+function formatStepStats(st) {
+    if (!st) return [];
+    const count = (v) => Math.round(v).toLocaleString("en-US");
+    const secs = (ms) => {
+        if (ms < 1000) return Math.round(ms) + " ms";
+        if (ms < 59950) return (ms / 1000).toFixed(1) + " s";
+        const s = Math.round(ms / 1000);
+        return `${Math.floor(s / 60)}m ${s % 60}s`;
+    };
+    const out = [];
+    if (st.tps) out.push({ label: "Speed", value: st.tps.toFixed(1) + " tok/s", title: st.tpsSource === "server" ? "Generation speed, measured by the server" : "Generation speed from the first streamed token to the end, by this page's clock (includes network time)" });
+    if (st.ttftMs) out.push({ label: "First token", value: secs(st.ttftMs), title: "From sending the request to the first streamed token (reasoning counts): network, queueing and prompt processing" });
+    if (st.completion) out.push({ label: "Output", value: count(st.completion) + " tok" + (st.reasoning ? ` · ${count(st.reasoning)} thinking` : ""), title: "Tokens the model generated in this step" + (st.reasoning ? ", of which reasoning" : "") });
+    if (st.prompt) out.push({ label: "Prompt", value: count(st.prompt) + " tok" + (st.cached ? ` · ${count(st.cached)} cached` : ""), title: "Tokens sent to the model in this step" + (st.cached ? "; cached ones were reused from the server's prompt cache instead of being processed again" : "") });
+    if (st.promptTps) out.push({ label: "Prompt speed", value: count(st.promptTps) + " tok/s", title: "Prompt processing speed, measured by the server (uncached tokens only)" });
+    if (st.ctxUsed) {
+        const e = { label: "Context", value: count(st.ctxUsed) + " tok", title: "Prompt plus output: how much of the context window this step filled. The endpoint doesn't report its context size (llama.cpp's /props does)." };
+        if (st.ctxSize) {
+            const frac = st.ctxUsed / st.ctxSize;
+            e.value = `${count(st.ctxUsed)} / ${count(st.ctxSize)} · ${Math.round(frac * 100)}%`;
+            e.title = "Prompt plus output against the server's context size: how full the context window was at the end of this step";
+            e.meter = Math.min(1, frac);
+        }
+        out.push(e);
+    }
+    if (st.totalMs) out.push({ label: "Inference", value: secs(st.totalMs), title: "Wall-clock time of the whole model request" + (st.genMs ? ` (${secs(st.genMs)} after the first token)` : "") });
+    return out;
 }
 
 // Reasoning support for the configured endpoint, read from llama.cpp's /props or
 // Ollama's /api/show. Never probed with a throwaway completion: permissive servers
 // answer 200 for parameters they ignore, so a non-error proves nothing.
-const REASONING = { key: "", state: "unknown", levels: ["low", "medium", "high"], rejected: false };
+const REASONING = { key: "", state: "unknown", levels: ["low", "medium", "high"], rejected: false, nCtx: 0 };
 
+// Also returns llama.cpp's context size (nCtx, 0 when unknown) for the step stats.
 async function probeReasoningSupport(url, key, model) {
     const root = apiRoot(url);
     const headers = { "Authorization": "Bearer " + (key || "none") };
+    let nCtx = 0;
     try {
         const res = await fetch(root + "/props", { headers });
         if (res.ok) {
             const p = await res.json();
+            const gen = p.default_generation_settings || {};
+            nCtx = Number.isFinite(gen.n_ctx) && gen.n_ctx > 0 ? gen.n_ctx : Number.isFinite(p.n_ctx) && p.n_ctx > 0 ? p.n_ctx : 0;
             const caps = p.chat_template_caps;
             const t = parseReasoningTemplateSupport(p.chat_template);
             if (caps && typeof caps.supports_reasoning_effort === "boolean") {
-                return { state: caps.supports_reasoning_effort || t.supported ? "supported" : "unsupported", levels: t.levels, source: "llama.cpp /props" };
+                return { state: caps.supports_reasoning_effort || t.supported ? "supported" : "unsupported", levels: t.levels, source: "llama.cpp /props", nCtx };
             }
-            if (typeof p.chat_template === "string") return { state: t.supported ? "supported" : "unsupported", levels: t.levels, source: "server chat template" };
+            if (typeof p.chat_template === "string") return { state: t.supported ? "supported" : "unsupported", levels: t.levels, source: "server chat template", nCtx };
         }
     } catch (e) { /* no /props here — try Ollama next */ }
     try {
@@ -3768,10 +3861,10 @@ async function probeReasoningSupport(url, key, model) {
         });
         if (res.ok) {
             const t = parseReasoningTemplateSupport((await res.json()).template);
-            return { state: t.supported ? "supported" : "unsupported", levels: t.levels, source: "Ollama /api/show" };
+            return { state: t.supported ? "supported" : "unsupported", levels: t.levels, source: "Ollama /api/show", nCtx };
         }
     } catch (e) { /* not Ollama either */ }
-    return { state: "unknown", levels: ["low", "medium", "high"], source: "endpoint exposes no capability data" };
+    return { state: "unknown", levels: ["low", "medium", "high"], source: "endpoint exposes no capability data", nCtx };
 }
 
 async function ensureReasoningProbe() {
@@ -4039,6 +4132,7 @@ async function agentTurn() {
     step.reasoning = [apiReasoning, split.reasoning].filter(Boolean).join("\n\n");
     step.content = split.text;
     step.finishReason = result.finishReason || "";
+    step.stats = buildStepStats(result.rawUsage, result.timings, result.clock, REASONING.nCtx);
     const parsed = parseReply(split.text, result.finishReason);
     step.kind = parsed.kind;
     // The history keeps the visible reply only; reasoning isn't sent back.
@@ -4486,7 +4580,33 @@ function buildStepCard(item, idx, old) {
     return finishCard(card, item, idx);
 }
 
+function renderStepStats(stats) {
+    const entries = formatStepStats(stats);
+    if (!entries.length) return null;
+    const box = el("div", "step-stats");
+    box.setAttribute("aria-label", "Model stats for this step");
+    for (const e of entries) {
+        const it = el("span", "stat-item");
+        it.title = e.title;
+        it.appendChild(el("span", "stat-label", e.label));
+        it.appendChild(el("span", "stat-value", e.value));
+        if (e.meter !== undefined) {
+            const bar = el("span", "stat-meter");
+            const fill = el("span", "stat-meter-fill" + (e.meter >= 0.85 ? " is-high" : ""));
+            fill.style.width = (e.meter * 100).toFixed(1) + "%";
+            bar.appendChild(fill);
+            it.appendChild(bar);
+        }
+        box.appendChild(it);
+    }
+    return box;
+}
+
 function finishCard(card, item, idx) {
+    if (item.type === "step") {
+        const stats = renderStepStats(item.stats);
+        if (stats) card.appendChild(stats);
+    }
     if (Number.isInteger(item.checkpoint) && (item.type !== "step" || item.phase === "done") && !RUN.active) {
         const foot = el("div", "card-foot");
         foot.appendChild(button("⏪ Rewind to here", "rewind", idx, "ghost", "Restore the workspace and history as of this point"));
@@ -4857,7 +4977,7 @@ async function testConnection() {
         select.hidden = false;
         $("settingModelInput").hidden = true;
         const r = await probeReasoningSupport(url, key, currentSettingsModel());
-        $("reasoningStatus").textContent = `Reasoning control: ${r.state} (${r.source})`;
+        $("reasoningStatus").textContent = `Reasoning control: ${r.state} (${r.source})` + (r.nCtx ? ` · context ${r.nCtx.toLocaleString("en-US")} tokens` : "");
         showToast(`✅ Connection successful! Found ${models.length} model${models.length === 1 ? "" : "s"}.`);
     } catch (error) {
         const baseUrl = $("settingUrl").value.trim();
