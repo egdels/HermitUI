@@ -34,7 +34,9 @@ you couldn't afford to leak.
 You give the agent a task, for example "clean up these CSVs and chart the monthly
 totals", "write and test a parser for this log format" or "check this calculation
 numerically". The agent works through it step by step: it writes Python, runs it
-against a virtual file system, reads the output and decides the next step.
+against a virtual file system, reads the output and decides the next step. Text
+files it can also read, write and edit directly, with `<read_file>`, `<write_file>`
+and `<edit_file>` actions that need no Python and are gated before they apply.
 
 What makes it different from CLI agents is that **you can supervise it**:
 

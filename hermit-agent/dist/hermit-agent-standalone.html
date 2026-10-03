@@ -1929,6 +1929,19 @@ pre.output.is-error { border-color: var(--danger); }
 .file-chip.added { color: var(--ok); border-color: var(--ok); }
 .file-chip.modified { color: var(--warn); border-color: var(--warn); }
 .file-chip.deleted { color: var(--danger); border-color: var(--danger); }
+.file-actions { list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 0.86rem; }
+.file-action { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.file-action-verb { font-weight: 600; }
+.file-action-path { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.82rem; word-break: break-all; }
+.file-action-msg { color: var(--text-muted); }
+.file-action.is-error .file-action-msg { color: var(--danger); }
+.file-edits { flex-basis: 100%; }
+.file-edits summary, .file-result summary { cursor: pointer; color: var(--text-muted); font-size: 0.82rem; user-select: none; }
+.edit-pair { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.edit-pair pre { white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
+.edit-old { border-left: 3px solid var(--danger); background: var(--danger-bg); }
+.edit-new { border-left: 3px solid var(--ok); background: var(--ok-bg); }
+.file-result pre.output { margin-top: 6px; }
 .step-notes { font-size: 0.82rem; color: var(--text-muted); padding-left: 1.2em; white-space: pre-wrap; word-break: break-word; }
 .hint { font-size: 0.82rem; color: var(--text-muted); }
 
@@ -2638,7 +2651,7 @@ const PYODIDE_VERSION = "0.29.5";
 const PYODIDE_CDN = "https://cdn.jsdelivr.net/pyodide/v0.29.5/full/";
 const SESSION_FORMAT = "hermit-agent-session";
 const SESSION_FORMAT_VERSION = 1;
-const LIMITS = { maxFiles: 5000, maxWorkspaceBytes: 256 * 1024 * 1024, maxArchiveEntries: 20000, maxArchiveBytes: 512 * 1024 * 1024, maxPathLength: 512, riskMaxFiles: 20, riskMaxBytes: 10 * 1024 * 1024, bootTimeoutMs: 120000, stepLimitIncrement: 10 };
+const LIMITS = { maxFiles: 5000, maxWorkspaceBytes: 256 * 1024 * 1024, maxArchiveEntries: 20000, maxArchiveBytes: 512 * 1024 * 1024, maxPathLength: 512, riskMaxFiles: 20, riskMaxBytes: 10 * 1024 * 1024, bootTimeoutMs: 120000, stepLimitIncrement: 10, readMaxLines: 400, readMaxChars: 32000, readMaxTotalChars: 64000, readMaxLineChars: 2000 };
 const THROTTLE_MS = 80;
 
 // ========== 2. Helpers copied from HermitUI ==========
@@ -2926,15 +2939,34 @@ Environment: Pyodide (CPython 3.13 compiled to WebAssembly) running inside the u
 
 Every reply must be exactly ONE of:
 1. Short reasoning, then exactly ONE \`\`\`python code block. It is executed and you get its output back in an <observation> message. Write nothing after the code block. Only \`\`\`python blocks are executed. To show output, data or other non-Python text, use a \`\`\`text block.
-2. The final answer for the user, with NO python code block, once the task is complete. Mention the files you created.
-3. A line starting with "ask:" followed by your question, if you cannot continue without information from the user.
+2. Short reasoning, then one or more file actions (see below). They are applied in order and you get the results back in an <observation> message. Never put file actions and a \`\`\`python block in the same reply.
+3. The final answer for the user, with NO python code block and no file actions, once the task is complete. Mention the files you created.
+4. A line starting with "ask:" followed by your question, if you cannot continue without information from the user.
+
+File actions read and change text files in /workspace directly. Prefer them over Python for reading, creating and editing source code, documents and other text files. Use Python to run code, process data and handle binary files. Start each tag on its own line:
+<read_file path="notes.txt"/>
+  Shows the file with line numbers, at most 400 lines at a time; add start="401" end="800" for more. The line numbers are not part of the file.
+<write_file path="docs/report.md">
+the complete content of the file
+</write_file>
+  Creates the file, or replaces all of its content. Folders are created as needed.
+<edit_file path="app.py">
+<old>
+the exact text to replace, copied from the file
+</old>
+<new>
+the replacement text
+</new>
+</edit_file>
+  Replaces text in an existing file. Each <old> must match the file exactly, indentation included, and occur exactly once: add surrounding lines to make it unique. Several <old>/<new> pairs may follow each other inside one edit_file. An empty <new></new> deletes the text.
+Paths are relative to /workspace. If any write or edit in a reply fails, none of that reply's changes are applied.
 
 Rules:
 - Inspect files before you modify them.
 - Print short summaries, not whole files or huge data.
 - Don't delete or overwrite the user's files unless the task requires it.
 - Take one step at a time: you only see a step's output in the next turn.
-- Code blocks are executed, never saved. To create a file, write it from your code, e.g. pathlib.Path("reader.py").write_text(source). A "# reader.py" comment at the top of a block does not create a file.`;
+- Code blocks are executed, never saved. To create a file, use <write_file> (or write it from your code). A "# reader.py" comment at the top of a block does not create a file.`;
     const extra = String(instructions || "").trim();
     return extra ? base + "\n\nAdditional instructions from the user:\n" + extra : base;
 }
@@ -2965,11 +2997,19 @@ function splitReply(raw, isFinal) {
 
 // DESIGN §5.1. Only fences tagged python run (a bare fence the model used to show
 // output was once executed as code); the first block wins; an unclosed block means
-// the stream was cut. Returns { kind: code|ask|final|broken|cutoff|empty, ... }.
+// the stream was cut. File actions and a python block in one reply are "mixed": nothing
+// runs. Returns { kind: code|files|mixed|ask|final|broken|cutoff|empty, ... }.
 function parseReply(text, finishReason) {
-    const t = String(text || "");
+    // File-action tags come out first, so fences inside a file's content aren't code.
+    const fa = extractFileActions(text);
+    const t = fa.rest;
+    if (fa.unclosed) return { kind: finishReason === "length" ? "cutoff" : "broken", prose: t.trim(), unclosed: fa.unclosed };
     const re = /```(?:python3?|py)[ \t]*\r?\n([\s\S]*?)```/g;
     const blocks = [...t.matchAll(re)];
+    if (fa.actions.length) {
+        if (blocks.length || /```(?:python3?|py)[ \t]*$/m.test(t)) return { kind: "mixed", prose: t.trim(), actionCount: fa.actions.length };
+        return { kind: "files", actions: fa.actions, prose: t.trim() };
+    }
     if (blocks.length) {
         return { kind: "code", code: blocks[0][1], blockCount: blocks.length, prose: t.slice(0, blocks[0].index).trim() };
     }
@@ -3034,7 +3074,8 @@ function buildObservation(o) {
     const lines = [`<observation step="${o.step}" status="${o.status}">`];
     if (o.status === "rejected") lines.push("The user rejected this step." + (o.reason ? " Reason: " + o.reason : ""));
     if (typeof o.output === "string") {
-        const out = truncateOutput(o.output);
+        // File steps cap their own reads; truncating would cut a read in the middle.
+        const out = o.truncate === false ? o.output : truncateOutput(o.output);
         lines.push(out.trim() ? out.replace(/\s+$/, "") : "(no output)");
     }
     if (o.changes) lines.push("files changed: " + formatChanges(o.changes));
@@ -3084,7 +3125,7 @@ function filenameCommentHint(code, paths) {
     const name = m[1].replace(/^\/?workspace\//, "");
     const have = new Set(paths || []);
     if (have.has(name) || [...have].some(p => p.split("/").pop() === name)) return "";
-    return `Your code starts with "# ${m[1]}", but running a code block doesn't save it: there is no ${name} in /workspace. If you meant to create that file, write it from your code.`;
+    return `Your code starts with "# ${m[1]}", but running a code block doesn't save it: there is no ${name} in /workspace. If you meant to create that file, use <write_file path="${name}">.`;
 }
 
 // Files a final answer presents (in backticks or bold) that aren't in the workspace.
@@ -3101,6 +3142,213 @@ function missingMentionedFiles(answer, paths) {
         out.push(raw);
     }
     return out;
+}
+
+// File actions (DESIGN §5.1): read, write and edit text files without Python. The tag
+// names are also the tool names a native tool-call parser will feed into
+// applyFileActions (DESIGN §5.5), which knows nothing about the wire format.
+const FILE_TOOLS = ["read_file", "write_file", "edit_file"];
+
+// A path as models write it ("/workspace/x", "./x") made relative, or null if unsafe.
+function normalizeActionPath(raw) {
+    const p = String(raw || "").trim().replace(/^\/?workspace\//, "").replace(/^(?:\.\/)+/, "");
+    return isSafeRelPath(p) ? p : null;
+}
+
+function parseTagAttrs(s) {
+    const out = {};
+    for (const m of String(s || "").matchAll(/([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>/]+))/g)) {
+        out[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4];
+    }
+    return out;
+}
+
+// Tags count only at the start of a line. Content runs to the first closing tag, so a
+// file can hold ``` fences but not its own closing tag. One newline after an opening
+// tag is dropped; a write keeps its trailing newline, <old>/<new> drop one at each end.
+// Returns { actions: [{ tool, args, error? }], rest (the reply without the tags),
+// unclosed (the tool name of a tag that never closed, or "") }.
+function extractFileActions(text) {
+    const t = String(text || "");
+    const open = /^[ \t]*<(read_file|write_file|edit_file)\b([^>\n]*?)(\/?)>/gm;
+    const lead = (s) => s.replace(/^\r?\n/, "");
+    const snippet = (s) => lead(s).replace(/\r?\n$/, "");
+    const actions = [];
+    let rest = "", pos = 0, unclosed = "", m;
+    while ((m = open.exec(t))) {
+        const tool = m[1], attrs = parseTagAttrs(m[2]), selfClosing = m[3] === "/";
+        rest += t.slice(pos, m.index);
+        let end = m.index + m[0].length, body = "";
+        if (tool === "read_file") {
+            const close = !selfClosing && t.slice(end).match(/^\s*<\/read_file>/);
+            if (close) end += close[0].length;
+        } else if (!selfClosing) {
+            const ci = t.indexOf(`</${tool}>`, end);
+            if (ci < 0) { unclosed = tool; pos = t.length; break; }
+            body = t.slice(end, ci);
+            end = ci + tool.length + 3;
+        }
+        pos = open.lastIndex = end;
+        const action = { tool, args: { path: attrs.path === undefined ? "" : attrs.path } };
+        const path = normalizeActionPath(attrs.path);
+        if (attrs.path === undefined || !String(attrs.path).trim()) action.error = `<${tool}> needs a path attribute, e.g. <${tool} path="notes.txt">.`;
+        else if (!path) action.error = `Unsafe path ${JSON.stringify(String(attrs.path).slice(0, 100))}: use a relative path inside /workspace.`;
+        else action.args.path = path;
+        if (selfClosing && tool !== "read_file") action.error = action.error || `<${tool} … /> has no content: put it between <${tool} path="…"> and </${tool}>.`;
+        if (tool === "read_file") {
+            for (const [attr, key] of [["start", "start_line"], ["end", "end_line"]]) {
+                if (attrs[attr] === undefined) continue;
+                const n = Number(attrs[attr]);
+                if (Number.isInteger(n) && n >= 1) action.args[key] = n;
+                else action.error = action.error || `${attr}="${attrs[attr]}" is not a line number (lines start at 1).`;
+            }
+        } else if (tool === "write_file") {
+            action.args.content = lead(body);
+        } else {
+            const edits = [...body.matchAll(/<old>([\s\S]*?)<\/old>\s*<new>([\s\S]*?)<\/new>/g)].map(e => ({ old_text: snippet(e[1]), new_text: snippet(e[2]) }));
+            action.args.edits = edits;
+            if (!edits.length) action.error = action.error || "<edit_file> needs at least one <old>…</old> <new>…</new> pair.";
+        }
+        actions.push(action);
+    }
+    rest += t.slice(pos);
+    return { actions, rest, unclosed };
+}
+
+// Text content of a file, or null for binary (NUL bytes or invalid UTF-8).
+function decodeTextFile(bytes) {
+    if (!bytes || bytes.includes(0)) return null;
+    try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch (e) { return null; }
+}
+
+function countOccurrences(hay, needle) {
+    let n = 0;
+    for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + needle.length)) n++;
+    return n;
+}
+
+// Run file actions against the workspace without touching it. ws: { paths: [...],
+// read(path) -> Uint8Array | null }. Actions run in order on an overlay, so a read sees
+// an earlier write. Writes and edits are all-or-nothing: the first one that fails stops
+// the batch and nothing is written. Returns { results: [{ tool, path, ok, message,
+// output?, startLine?, endLine?, edits? }], writes: Map(path -> text), failed }.
+function applyFileActions(actions, ws, opts) {
+    const lim = { ...LIMITS, ...(opts || {}) };
+    const overlay = new Map();
+    const paths = new Set(ws.paths || []);
+    const results = [];
+    let budget = lim.readMaxTotalChars, failed = false;
+    const current = (p) => {
+        if (overlay.has(p)) return { text: overlay.get(p) };
+        const bytes = paths.has(p) ? ws.read(p) : null;
+        if (!bytes) return null;
+        const text = decodeTextFile(bytes);
+        return text === null ? { binary: bytes.length } : { text };
+    };
+    const lineCount = (s) => (s === "" ? 0 : s.split("\n").length - (s.endsWith("\n") ? 1 : 0));
+    for (const a of actions || []) {
+        const path = a.args && a.args.path || "";
+        const r = { tool: a.tool, path, ok: false, message: "" };
+        results.push(r);
+        if (failed) { r.message = "not run: an earlier action failed"; continue; }
+        if (a.tool === "edit_file") r.edits = ((a.args && a.args.edits) || []).map(e => ({ old: e.old_text, new: e.new_text }));
+        const fail = (msg) => { r.message = msg; if (a.tool !== "read_file") failed = true; };
+        if (a.error || !FILE_TOOLS.includes(a.tool)) { fail(a.error || `Unknown file action ${a.tool}.`); continue; }
+        const cur = current(path);
+        if (a.tool === "read_file") {
+            if (!cur) { fail(`There is no file ${path} in /workspace.`); continue; }
+            if (cur.binary !== undefined) { fail(`${path} is a binary file (${formatBytes(cur.binary)}); inspect it with python.`); continue; }
+            if (budget <= 0) { fail("Not read: this reply's read budget is used up. Read it in your next reply."); continue; }
+            const lines = cur.text.split(/\r?\n/);
+            if (cur.text.endsWith("\n")) lines.pop();
+            const total = cur.text === "" ? 0 : lines.length;
+            const start = a.args.start_line || 1;
+            if (total === 0) { r.ok = true; r.message = "empty file"; r.output = "(empty file)"; continue; }
+            if (start > total) { fail(`${path} has only ${total} line${total === 1 ? "" : "s"}.`); continue; }
+            const maxEnd = Math.min(total, start + lim.readMaxLines - 1);
+            const want = Math.min(total, a.args.end_line ? Math.max(start, a.args.end_line) : maxEnd);
+            const end = Math.min(want, maxEnd);
+            const width = String(end).length;
+            const cap = Math.min(lim.readMaxChars, budget);
+            const out = [];
+            let used = 0, last = start - 1;
+            for (let i = start; i <= end; i++) {
+                let line = lines[i - 1];
+                if (line.length > lim.readMaxLineChars) line = line.slice(0, lim.readMaxLineChars) + ` […${line.length - lim.readMaxLineChars} more characters]`;
+                const row = String(i).padStart(width) + "\t" + line;
+                if (used + row.length + 1 > cap && out.length) break;
+                out.push(row);
+                used += row.length + 1;
+                last = i;
+            }
+            budget -= used;
+            r.ok = true;
+            r.startLine = start;
+            r.endLine = last;
+            r.message = `lines ${start}–${last} of ${total}`;
+            r.output = out.join("\n") + (last < want || (!a.args.end_line && last < total) ? `\n[… ${total} lines in total; continue with start="${last + 1}" …]` : "");
+            continue;
+        }
+        if (a.tool === "write_file") {
+            const content = String(a.args.content ?? "");
+            const exists = (p) => paths.has(p) || overlay.has(p);
+            if ([...paths, ...overlay.keys()].some(p => p.startsWith(path + "/"))) { fail(`${path} is a folder.`); continue; }
+            const segs = path.split("/");
+            const parent = segs.slice(1).map((_, i) => segs.slice(0, i + 1).join("/")).find(exists);
+            if (parent) { fail(`${parent} is a file, so it can't contain ${path}.`); continue; }
+            r.ok = true;
+            if (cur && cur.text === content) { r.message = "unchanged (same content)"; continue; }
+            overlay.set(path, content);
+            const size = formatBytes(new TextEncoder().encode(content).length);
+            r.message = `${cur ? "replaced" : "created"} (${lineCount(content)} line${lineCount(content) === 1 ? "" : "s"}, ${size})`;
+            continue;
+        }
+        // edit_file
+        if (!cur) { fail(`There is no file ${path} in /workspace. Create it with <write_file>.`); continue; }
+        if (cur.binary !== undefined) { fail(`${path} is a binary file; it can't be edited as text.`); continue; }
+        let text = cur.text;
+        const crlf = text.includes("\r\n") && !/(^|[^\r])\n/.test(text);
+        const fix = (s) => (crlf ? String(s).replace(/\r?\n/g, "\r\n") : String(s));
+        const flat = (s) => s.split(/\r?\n/).map(l => l.trim()).join("\n");
+        const edits = a.args.edits || [];
+        let error = "";
+        for (let k = 0; k < edits.length && !error; k++) {
+            const which = edits.length > 1 ? `change ${k + 1} of ${edits.length}: ` : "";
+            const oldT = fix(edits[k].old_text), newT = fix(edits[k].new_text);
+            if (!oldT) { error = which + "<old> is empty. Copy the text to replace from the file."; break; }
+            if (oldT === newT) { error = which + "<old> and <new> are identical."; break; }
+            const n = countOccurrences(text, oldT);
+            if (n === 0) {
+                error = which + (flat(oldT).trim() && flat(text).includes(flat(oldT))
+                    ? `the <old> text differs from ${path} only in whitespace or indentation. Copy it exactly (read_file shows the file).`
+                    : `the <old> text was not found in ${path}. Read the file and copy the text exactly.`);
+            } else if (n > 1) {
+                error = which + `the <old> text matches ${n} times in ${path}. Include more surrounding lines so it matches once.`;
+            } else {
+                const i = text.indexOf(oldT);
+                text = text.slice(0, i) + newT + text.slice(i + oldT.length);
+            }
+        }
+        if (error) { fail(error); continue; }
+        overlay.set(path, text);
+        r.ok = true;
+        r.message = `edited (${edits.length} change${edits.length === 1 ? "" : "s"})`;
+    }
+    return { results, writes: failed ? new Map() : overlay, failed };
+}
+
+// What the model gets back from a file step (the observation body).
+function formatFileResults(results, failed) {
+    const out = [];
+    results.forEach((r, i) => {
+        const head = `[${i + 1}] ${r.tool} ${r.path || "?"}: ${r.ok ? r.message : "ERROR: " + r.message}`;
+        out.push(r.output !== undefined ? head + "\n" + r.output : head);
+    });
+    if (failed) {
+        const i = results.findIndex(r => !r.ok && r.tool !== "read_file");
+        out.push(`No file changes were applied, because action ${i + 1} failed. Fix it and send all of the changes again.`);
+    }
+    return out.join("\n");
 }
 
 // ========== 4. Zip + session archive (pure) ==========
@@ -3302,6 +3550,11 @@ function transcriptMarkdown(session) {
             else {
                 if (item.prose) md.push(item.prose, ``);
                 if (item.proposedCode) md.push(block("python", item.proposedCode), ``);
+                for (const a of item.fileActions || []) {
+                    md.push(`- \`${a.tool}\` ${a.path}: ${a.ok ? "" : "failed: "}${a.message}`);
+                    for (const e of a.edits || []) md.push(``, block("text", e.old), ``, `replaced by`, ``, block("text", e.new));
+                }
+                if ((item.fileActions || []).length) md.push(``);
                 if (item.edited && item.ranCode) md.push(`Edited by the user before it ran:`, ``, block("python", item.ranCode), ``);
                 if (item.output) md.push(`Output:`, ``, block("text", item.output), ``);
                 if (item.changes) md.push(`Files changed: ${formatChanges(item.changes)}`, ``);
@@ -3399,6 +3652,15 @@ function validateSession(raw) {
                     : null;
                 s.risk = it.risk && typeof it.risk === "object" ? { verdict: str(it.risk.verdict), reasons: strArr(it.risk.reasons) } : null;
                 s.stats = cleanStepStats(it.stats);
+                if (Array.isArray(it.fileActions)) {
+                    s.fileActions = it.fileActions.filter(a => a && typeof a === "object" && FILE_TOOLS.includes(a.tool)).map(a => {
+                        const r = { tool: a.tool, path: str(a.path), ok: a.ok === true, message: str(a.message) };
+                        if (Number.isInteger(a.startLine)) r.startLine = a.startLine;
+                        if (Number.isInteger(a.endLine)) r.endLine = a.endLine;
+                        if (Array.isArray(a.edits)) r.edits = a.edits.filter(e => e && typeof e === "object").map(e => ({ old: str(e.old), new: str(e.new) }));
+                        return r;
+                    });
+                }
                 // Nothing restores mid-flight: a step that was waiting or running when the
                 // session was exported is shown as interrupted.
                 if (s.phase && s.phase !== "done") { s.phase = "done"; s.status = s.status || "interrupted"; }
@@ -4066,7 +4328,7 @@ async function runLoop() {
             // for Retry.
             restartInterpreter();
             const lastMsg = S.messages[S.messages.length - 1];
-            if (lastMsg && lastMsg.role === "assistant" && last.kind === "code") {
+            if (lastMsg && lastMsg.role === "assistant" && (last.kind === "code" || last.kind === "files")) {
                 S.messages.push({ role: "user", content: buildObservation({ step: last.n, status: "error", notes: ["The harness failed while handling this step (" + (e.message || e) + "). Nothing was committed, and the interpreter was restarted: variables are lost, files are as they were before this step."] }) });
             }
         }
@@ -4151,7 +4413,7 @@ async function agentTurn() {
             step.endedAt = nowIso();
             const list = missing.join(", ");
             step.notes = [`The answer mentions ${list}, which ${missing.length === 1 ? "isn't" : "aren't"} in the workspace. The agent was asked to check.`];
-            S.messages.push({ role: "user", content: buildObservation({ step: n, status: "error", notes: [`Your answer mentions ${list}, but /workspace has no such file${missing.length === 1 ? "" : "s"}. Files that exist: ${[...WS.files.keys()].join(", ") || "(none)"}. Create the missing file${missing.length === 1 ? "" : "s"} with code, or correct your answer.`] }) });
+            S.messages.push({ role: "user", content: buildObservation({ step: n, status: "error", notes: [`Your answer mentions ${list}, but /workspace has no such file${missing.length === 1 ? "" : "s"}. Files that exist: ${[...WS.files.keys()].join(", ") || "(none)"}. Create the missing file${missing.length === 1 ? "" : "s"} with <write_file> or code, or correct your answer.`] }) });
             step.checkpoint = takeCheckpoint("step " + n);
             renderTimelineItem(idx);
             return "continue";
@@ -4173,12 +4435,16 @@ async function agentTurn() {
         setStatus("awaiting-user");
         return "ask";
     }
-    if (parsed.kind !== "code") {
-        // Cut off, empty or an unclosed code block: nothing ran. Tell the model why.
+    if (parsed.kind !== "code" && parsed.kind !== "files") {
+        // Cut off, empty, an unclosed block or tag, or file actions mixed with code:
+        // nothing ran. Tell the model why.
         const why = {
-            cutoff: "Your reply was cut off at the token limit before it finished, so nothing ran. Reason less and reply with ONE ```python block or the final answer.",
-            empty: "Your reply had no code block and no answer, so nothing ran. Reply with ONE ```python block, the final answer, or an ask: line.",
-            broken: "Your reply had an unclosed ```python block, so nothing ran. Reply with ONE complete ```python block.",
+            cutoff: "Your reply was cut off at the token limit before it finished, so nothing ran. Reason less and reply with ONE ```python block, file actions, or the final answer.",
+            empty: "Your reply had no code block, no file actions and no answer, so nothing ran. Reply with ONE ```python block, file actions, the final answer, or an ask: line.",
+            broken: parsed.unclosed
+                ? `Your reply had a <${parsed.unclosed}> tag without its closing </${parsed.unclosed}>, so nothing ran. Send the action again, closed.`
+                : "Your reply had an unclosed ```python block, so nothing ran. Reply with ONE complete ```python block.",
+            mixed: "Your reply had both file actions and a ```python block, so nothing ran. Send file actions and code in separate replies: first the file actions, then the code once you have their results.",
         }[parsed.kind];
         step.prose = parsed.prose || "";
         step.status = parsed.kind;
@@ -4191,11 +4457,17 @@ async function agentTurn() {
     }
 
     step.prose = parsed.prose;
-    step.proposedCode = parsed.code;
-    step.blockCount = parsed.blockCount;
     const notes = [];
-    if (parsed.blockCount > 1) notes.push(`Only the first of your ${parsed.blockCount} code blocks was run.`);
-    const outcome = await executeStep(step, idx, notes);
+    let outcome;
+    if (parsed.kind === "files") {
+        if (result.finishReason === "length") notes.push("Your reply was cut off at the token limit after these file actions; anything after them was lost.");
+        outcome = await executeFileStep(step, idx, parsed.actions, notes);
+    } else {
+        step.proposedCode = parsed.code;
+        step.blockCount = parsed.blockCount;
+        if (parsed.blockCount > 1) notes.push(`Only the first of your ${parsed.blockCount} code blocks was run.`);
+        outcome = await executeStep(step, idx, notes);
+    }
     step.phase = "done";
     step.endedAt = nowIso();
     S.messages.push({ role: "user", content: outcome.observation });
@@ -4295,6 +4567,93 @@ async function executeStep(step, idx, notes) {
         step.decidedBy = "user";
         notes = [...notes, "The interpreter was restarted before this run: variables from earlier steps are lost."];
     }
+}
+
+// A file-action step (DESIGN §2.3). The actions are worked out against the canonical
+// workspace without changing it, so the effect is gated *before* anything is applied:
+// a reject has nothing to roll back and the interpreter keeps its variables.
+// Returns { observation, stop }.
+async function executeFileStep(step, idx, actions, notes) {
+    const ws = { paths: [...WS.files.keys()], read: (p) => { const f = WS.files.get(p); return f ? WS.blobs.get(f.hash) || null : null; } };
+    const applied = applyFileActions(actions, ws);
+    step.fileActions = applied.results.map(r => {
+        const a = { tool: r.tool, path: r.path, ok: r.ok, message: r.message };
+        if (r.startLine) { a.startLine = r.startLine; a.endLine = r.endLine; }
+        if (r.edits) a.edits = r.edits;
+        return a;
+    });
+    step.output = formatFileResults(applied.results, applied.failed);
+    step.status = applied.results.every(r => r.ok) ? "ok" : "error";
+    step.notes = [...notes];
+    let effect = null;
+    if (applied.writes.size) {
+        const enc = new TextEncoder();
+        const listing = {}, files = {};
+        for (const [p, f] of WS.files) listing[p] = f.hash;
+        for (const [p, text] of applied.writes) {
+            files[p] = enc.encode(text);
+            listing[p] = await sha256Hex(files[p]);
+        }
+        effect = await collectEffect({ listing, files });
+        effect.gen = -1;   // not in the worker yet: commitEffect mustn't mark it in sync
+        if (!effect.diff.added.length && !effect.diff.modified.length) effect = null;
+    }
+    if (effect) {
+        step.changes = effect.changes;
+        step._held = effect.hashes;
+        const origins = {};
+        for (const [p, f] of WS.files) origins[p] = f.origin;
+        step.risk = classifyEffect(effect.diff, origins, { bytesWritten: effect.bytesWritten, overLimit: effect.overLimit });
+    } else if (applied.writes.size || actions.some(a => a.tool !== "read_file")) {
+        step.changes = { added: [], modified: [], deleted: [] };
+    }
+
+    const autonomy = SETTINGS.autonomy;
+    let decision = { action: "approve" };
+    const hold = autonomy === "approve" || (autonomy === "risk" && effect && step.risk.verdict === "ask");
+    if (effect && effect.overLimit && autonomy !== "risk") {
+        decision = { action: "reject", reason: effect.overLimit, auto: true };
+    } else if (hold) {
+        step.phase = "pending-approval";
+        renderTimelineItem(idx);
+        renderWorkspace();
+        setStatus("awaiting-approval");
+        decision = await waitForDecision(idx);
+        setStatus("running");
+    }
+    if (decision.action === "approve") {
+        if (effect) {
+            const prevVersion = WS.version;
+            commitEffect(effect);
+            await pushEffectToWorker(effect, prevVersion);
+        }
+        if (effect || hold) {
+            step.decision = hold ? "approved" : "auto";
+            step.decidedBy = hold ? "user" : "auto";
+        }
+        return { observation: buildObservation({ step: step.n, status: step.status, output: step.output, changes: step.changes, notes: step.notes, truncate: false }), stop: false };
+    }
+    step.decision = "rejected";
+    step.decidedBy = decision.auto ? "auto" : "user";
+    step.rejectReason = decision.reason || "";
+    step.status = "rejected";
+    WS.lastChanged = new Set();
+    const nothing = actions.some(a => a.tool === "read_file") ? "Nothing was applied and you don't get the read results; files are unchanged." : "Nothing was applied; files are unchanged.";
+    return { observation: buildObservation({ step: step.n, status: "rejected", reason: decision.reason, notes: [...notes, nothing] }), stop: !!decision.stop };
+}
+
+// After a committed file step, hand the new bytes to the worker if it held exactly the
+// previous workspace, instead of a full re-seed before the next python step. Anything
+// else (not booted, busy, restarted meanwhile) is left to syncWorkspaceToWorker.
+async function pushEffectToWorker(effect, prevVersion) {
+    if (PY.state !== "idle" || PY.syncedVersion !== prevVersion) return;
+    const gen = PY.gen, version = WS.version;
+    const files = {};
+    for (const [p, hash] of effect.pending) files[p] = WS.blobs.get(hash);
+    try {
+        await workerCall("write", { files }, 30000);
+        if (gen === PY.gen && WS.version === version) PY.syncedVersion = version;
+    } catch (e) { /* the next python step re-seeds */ }
 }
 
 // Turn a run result into a diff against the canonical workspace, with verified bytes.
@@ -4454,7 +4813,7 @@ function button(label, action, idx, cls, title) {
 }
 
 const VERDICT_LABELS = { auto: "✅ auto-committed", approved: "👍 approved", edited: "✏️ edited & approved", rejected: "↩️ rejected", "rolled back": "↩️ rolled back", "approved (network)": "🌐 approved with network" };
-const STATUS_LABELS = { unverified: "⚠️ files missing", ok: "ok", error: "error", timeout: "⏱ timeout", killed: "☠️ killed", crashed: "💥 crashed", rejected: "rejected", cutoff: "✂️ cut off", empty: "empty reply", broken: "unclosed code", interrupted: "interrupted" };
+const STATUS_LABELS = { unverified: "⚠️ files missing", ok: "ok", error: "error", timeout: "⏱ timeout", killed: "☠️ killed", crashed: "💥 crashed", rejected: "rejected", cutoff: "✂️ cut off", empty: "empty reply", broken: "unclosed code", mixed: "mixed reply", interrupted: "interrupted" };
 
 function renderThink(item, card, streaming) {
     if (!item.reasoning) return;
@@ -4464,6 +4823,34 @@ function renderThink(item, card, streaming) {
     d.appendChild(el("summary", "", streaming ? "🧠 Thinking…" : `🧠 Reasoning (${item.reasoning.length.toLocaleString()} chars)`));
     d.appendChild(el("div", "think-content", item.reasoning));
     return d;
+}
+
+const FILE_ACTION_ICONS = { read_file: "📄", write_file: "✍️", edit_file: "✏️" };
+const FILE_ACTION_VERBS = { read_file: "read", write_file: "write", edit_file: "edit" };
+
+// One row per file action; edits expand to their old/new text (as text, never HTML).
+function renderFileActions(actions) {
+    const ul = el("ul", "file-actions");
+    for (const a of actions || []) {
+        const li = el("li", "file-action" + (a.ok ? "" : " is-error"));
+        li.appendChild(el("span", "file-action-icon", a.ok ? FILE_ACTION_ICONS[a.tool] || "•" : "❌"));
+        li.appendChild(el("span", "file-action-verb", FILE_ACTION_VERBS[a.tool] || a.tool));
+        li.appendChild(el("code", "file-action-path", a.path || "?"));
+        li.appendChild(el("span", "file-action-msg", a.message));
+        if ((a.edits || []).length) {
+            const d = el("details", "file-edits");
+            d.appendChild(el("summary", "", a.edits.length === 1 ? "Show the change" : `Show the ${a.edits.length} changes`));
+            for (const e of a.edits) {
+                const pair = el("div", "edit-pair");
+                pair.appendChild(el("pre", "edit-old", e.old));
+                pair.appendChild(el("pre", "edit-new", e.new || "(deleted)"));
+                d.appendChild(pair);
+            }
+            li.appendChild(d);
+        }
+        ul.appendChild(li);
+    }
+    return ul;
 }
 
 function renderFileChips(changes, idx) {
@@ -4516,6 +4903,7 @@ function buildStepCard(item, idx, old) {
         return finishCard(card, item, idx);
     }
     if (item.prose) card.appendChild(renderMarkdown(item.prose));
+    if (item.kind === "files") card.appendChild(renderFileActions(item.fileActions));
     if (item.proposedCode !== undefined && item.proposedCode !== "") {
         if (item.phase === "pending-run") {
             card.appendChild(el("label", "field-label", "Proposed code — edit it before running if you like:"));
@@ -4535,8 +4923,16 @@ function buildStepCard(item, idx, old) {
         const pre = el("pre", "output" + (item.status === "error" ? " is-error" : ""));
         pre.textContent = out.length > 200000 ? out.slice(0, 200000) + "\n[… display truncated; the full output is in the session export …]" : (out || "(no output)");
         card.appendChild(pre);
+    } else if (item.kind === "files") {
+        // The model's view of the step: read contents and messages, collapsed.
+        if (item.output) {
+            const d = el("details", "file-result");
+            d.appendChild(el("summary", "", item.phase === "pending-approval" ? "What the agent gets back if you approve" : "What the agent got back"));
+            d.appendChild(el("pre", "output", item.output));
+            card.appendChild(d);
+        }
     } else if (item.kind !== "code" && item.status) {
-        card.appendChild(el("p", "hint", { cutoff: "✂️ The reply was cut off at the token limit — nothing ran.", empty: "The reply was empty — nothing ran.", broken: "The reply had an unclosed code block — nothing ran." }[item.status] || ""));
+        card.appendChild(el("p", "hint", { cutoff: "✂️ The reply was cut off at the token limit — nothing ran.", empty: "The reply was empty — nothing ran.", broken: "The reply had an unclosed code block or file tag — nothing ran.", mixed: "The reply mixed file actions with a code block — nothing ran." }[item.status] || ""));
     }
     if (item.changes) card.appendChild(renderFileChips(item.changes, idx));
     const shownNotes = (item.notes || []).filter(n => !n.startsWith("The user edited your code"));
@@ -4549,7 +4945,10 @@ function buildStepCard(item, idx, old) {
 
     if (item.phase === "pending-run" || item.phase === "pending-approval") {
         const box = el("div", "decision");
-        if (item.phase === "pending-approval") {
+        if (item.phase === "pending-approval" && item.kind === "files") {
+            const reasons = item.risk && item.risk.reasons.length ? item.risk.reasons : null;
+            box.appendChild(el("p", "decision-why", (reasons ? "⚠️ Held for your approval: this step " + reasons.join("; ") + "." : "⏸ Approve each step is on.") + " Nothing is applied or sent to the agent until you approve; rejecting discards it."));
+        } else if (item.phase === "pending-approval") {
             box.appendChild(el("p", "decision-why", "⚠️ Held for your approval: this step " + (item.risk ? item.risk.reasons.join("; ") : "needs review") + ". Its effects are applied only if you approve; rejecting rolls them back."));
         }
         const reason = el("input", "reason-input");
@@ -4560,8 +4959,11 @@ function buildStepCard(item, idx, old) {
             row.appendChild(button("▶ Run", "run", idx, "primary"));
         } else {
             row.appendChild(button("✅ Approve", "approve", idx, "primary"));
-            if ((item.netAttempts || []).length) row.appendChild(button("🌐 Allow network & re-run", "rerun-net", idx, "", "Roll back, restart the interpreter and run the same code with network access"));
-            row.appendChild(button("✏️ Edit & re-run", "edit-open", idx, "", "Roll back and run your edited version instead"));
+            // A file step has nothing to re-run: nothing has been applied yet.
+            if (item.kind !== "files") {
+                if ((item.netAttempts || []).length) row.appendChild(button("🌐 Allow network & re-run", "rerun-net", idx, "", "Roll back, restart the interpreter and run the same code with network access"));
+                row.appendChild(button("✏️ Edit & re-run", "edit-open", idx, "", "Roll back and run your edited version instead"));
+            }
         }
         row.appendChild(button("↩️ Reject", "reject", idx, "danger"));
         box.appendChild(row);

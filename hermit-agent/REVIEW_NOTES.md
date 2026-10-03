@@ -95,6 +95,28 @@ look.
 - **Kill when idle** restarts the interpreter, and the model is told on its next
   request.
 
+## File actions (added after the MVP)
+
+- ⭐ **A reply holds file actions or one python block, never both** (your call).
+  A mixed reply runs nothing and gets an error observation. The alternative was
+  "files first, then the code" in one turn, which saves a model round-trip.
+- **Writes and edits in one reply are all-or-nothing.** The first failure stops the
+  batch. Reads before it keep their output; later actions are reported as not run.
+- **Approve-each holds read-only file steps too**, since a read sends file content to
+  the model. Risk-based and autopilot never hold a pure read.
+- **Tags count only at the start of a line, and content runs to the first closing
+  tag.** So a file can't contain its own `</write_file>` literally. That is rare
+  enough; the alternative is a length-prefixed or fence-counted format that small
+  models get wrong.
+- **Read caps:** 400 lines and 32 000 characters per read, 64 000 per reply, and
+  2 000 per line. They were picked to fit a typical source file in one read without
+  flooding an 8–16 k context. The file-step observation is therefore not truncated
+  again.
+- **Path leniency:** `/workspace/x` and `./x` are accepted as `x`. Anything else
+  unsafe is refused per action.
+- **A file step never boots the interpreter.** After a commit, the bytes go to the
+  worker only if it was idle and in sync. Otherwise the next python step re-seeds it.
+
 ## Checkpoints & rewind
 
 - **A checkpoint is taken after every model turn**, including rejected and non-code

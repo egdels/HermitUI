@@ -38,13 +38,26 @@ the `FUNCS` list with the rename. Only DOM-free code can be covered this way.
   - Tampering: a wrong checkpoint blob, missing content, an index pointing past the
     session, a missing manifest, a newer format version, broken JSON.
   - `validateSession` coercion and defaults.
+- **`files.test.mjs`** covers the file actions (DESIGN §5.1):
+  - `extractFileActions`: both quote styles, fences inside written content,
+    line-start only, unclosed tags, path normalising and unsafe paths.
+  - `parseReply` kinds `files`, `mixed`, `broken` and `cutoff`.
+  - `applyFileActions`:
+    - reads: numbering, ranges, the line, character and per-reply caps, binary and
+      missing files;
+    - writes: create, replace, unchanged, folder and parent-file conflicts;
+    - edits: unique, missing and repeated matches, the whitespace hint, CRLF,
+      ordered pairs, literal `$&`;
+    - all-or-nothing batches.
+  - `formatFileResults`, `buildObservation` with `truncate: false`, `fileActions` in
+    `validateSession` and the transcript.
 
 ## End-to-end — `e2e_agent.py`
 
 Opens the **built** `dist/hermit-agent-standalone.html` from `file://`, against
 `mock_openai.py`: a scripted OpenAI-compatible endpoint that picks replies by a
-keyword in the task and records every request, plus every hit on `/exfil/…`. Four
-scenarios:
+keyword in the task and records every request, plus every hit on `/exfil/…`. The
+main scenarios:
 
 1. **Risk-based**:
    - An auto-committed step.
@@ -65,6 +78,14 @@ scenarios:
 4. **Autopilot**: a delete of a user file commits without a hold, but the risk is
    still recorded. Every step card shows its stats block, with the mock's llama.cpp
    `timings` and the context size from its `/props`.
+5. **File actions**:
+   - Write, read and edit without Python. The model gets numbered lines.
+   - A python step imports the edited module.
+   - A write after a python step reaches the worker without a re-seed.
+   - An edit of a user file is held and rejected: the file is unchanged and the
+     interpreter keeps its variables.
+   - A mixed reply runs nothing.
+   - Export → import rebuilds the action rows.
 
 Stock Firefox (`firefox=<binary>`, driven over WebDriver BiDi) runs everything except
 the download-based checks, which Playwright can't capture over BiDi. It matters

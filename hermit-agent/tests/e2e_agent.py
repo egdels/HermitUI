@@ -134,6 +134,16 @@ print(len(rows), total)
             py('import os\nos.remove("data.csv")\nprint("gone")'),
             final("Removed it."),
         ],
+        "E2E-FILES": [
+            final('Creating the module and looking at the notes.\n<write_file path="hello.py">\ndef greet():\n    return "hi"\n</write_file>\n<read_file path="notes.txt"/>'),
+            final('<edit_file path="/workspace/hello.py">\n<old>\n    return "hi"\n</old>\n<new>\n    return "hello"\n</new>\n</edit_file>'),
+            py("import hello\nkept = hello.greet()\nprint(kept)"),
+            final('<write_file path="extra.txt">\npushed\n</write_file>'),
+            final('<edit_file path="notes.txt">\n<old>original note</old>\n<new>agent was here</new>\n</edit_file>'),
+            py('print(open("extra.txt").read().strip(), kept, open("notes.txt").read().strip())'),
+            final('<write_file path="x.py">\nx = 1\n</write_file>\n```python\nimport x\n```'),
+            final("Done: **hello.py** greets."),
+        ],
         "E2E-APPROVE": [
             py('print("original")'),
             py("while True:\n    pass"),
@@ -422,6 +432,74 @@ def phantom_scenario(browser, port, state):
     page.context.close()
 
 
+def file_text(page, path):
+    return page.evaluate("(p) => new TextDecoder().decode(WS.blobs.get(WS.files.get(p).hash))", path)
+
+
+def files_scenario(browser, port, state, downloads=True):
+    print("— file actions: write, read, edit, a held edit of a user file, mixed reply, export/import")
+    page = open_app(browser)
+    configure(page, port, 10)
+    page.set_input_files("#wsFileInput", files=[{"name": "notes.txt", "mimeType": "text/plain", "buffer": b"original note\n"}])
+    wait_until(page, "() => WS.files.has('notes.txt')", 10, "upload")
+    page.fill("#taskInput", "E2E-FILES: make a greeter")
+    page.click("#sendBtn")
+
+    wait_until(page, "() => S.status === 'awaiting-approval' && S.stepCount === 5", 60, "held edit of notes.txt")
+    check("held file step offers no re-run buttons",
+          page.locator(".step-card.phase-pending-approval [data-action=edit-open]").count() == 0
+          and page.locator(".step-card.phase-pending-approval [data-action=approve]").count() == 1)
+    check("…and says why it was held", "overwrites your file notes.txt" in page.locator(".step-card.phase-pending-approval .decision-why").inner_text())
+    check("a write after a python step reached the worker without a re-seed", page.evaluate("() => PY.syncedVersion === WS.version"))
+    check("a held edit changes nothing yet", file_text(page, "notes.txt") == "original note\n")
+    card = page.locator(".step-card.phase-pending-approval")
+    card.locator("[data-role=reason]").fill("leave my notes alone")
+    card.locator("[data-action=reject]").click()
+    wait_until(page, "() => S.status === 'done'", 60, "final")
+
+    st = steps(page)
+    check("step kinds", [s["kind"] for s in st] == ["files", "files", "code", "files", "files", "code", "mixed", "final"], [s["kind"] for s in st])
+    check("step statuses", [s["status"] for s in st][:7] == ["ok", "ok", "ok", "ok", "rejected", "ok", "mixed"], [s["status"] for s in st])
+    check("written, then edited", file_text(page, "hello.py") == 'def greet():\n    return "hello"\n', file_text(page, "hello.py"))
+    check("new files are the agent's, the upload stays the user's",
+          {p: o for p, h, o in workspace(page)} == {"hello.py": "agent", "extra.txt": "agent", "notes.txt": "user"}, workspace(page))
+    check("python saw the edited module", st[2]["output"] == "hello\n", st[2])
+    check("rejected edit left the user's file alone, and the interpreter kept its variables",
+          st[5]["output"] == "pushed hello original note\n", st[5])
+    m = [r["messages"][-1]["content"] for r in state.requests if "E2E-FILES" in r["messages"][1]["content"]]
+    check("model gets the numbered read and the write result",
+          "[1] write_file hello.py: created (2 lines" in m[1] and "[2] read_file notes.txt: lines 1–1 of 1\n1\toriginal note" in m[1], m[1])
+    check("…and the files changed", "files changed: +hello.py" in m[1], m[1])
+    check("model told about the edit", "[1] edit_file hello.py: edited (1 change)" in m[2] and "~hello.py" in m[2], m[2])
+    check("model told the rejection applied nothing", 'status="rejected"' in m[5] and "leave my notes alone" in m[5] and "Nothing was applied" in m[5], m[5])
+    check("model told not to mix", "both file actions and a ```python block" in m[7], m[7])
+    check("x.py from the mixed reply was not written", "x.py" not in [p for p, h, o in workspace(page)])
+    rows = page.locator(".step-card .file-action").count()
+    check("one row per file action", rows == 5, rows)
+    check("the edit's old/new pair is in the card", page.locator(".step-card .edit-pair").count() == 2)
+
+    if not downloads:
+        page.context.close()
+        return
+    with page.expect_download() as dl:
+        page.click("#exportBtn")
+        page.click("#exportSessionBtn")
+    zpath = str(pathlib.Path(tempfile.mkdtemp()) / "files-session.zip")
+    dl.value.save_as(zpath)
+    transcript = zipfile.ZipFile(zpath).read("transcript.md").decode()
+    check("transcript lists the file actions", "- `edit_file` hello.py: edited (1 change)" in transcript)
+    before = page.evaluate("() => JSON.stringify(S.timeline.map(t => t.fileActions || null))")
+    page.context.close()
+
+    page = open_app(browser)
+    page.set_input_files("#importInput", zpath)
+    wait_until(page, "() => S.status === 'paused' && S.timeline.length > 0", 30, "import")
+    after = page.evaluate("() => JSON.stringify(S.timeline.slice(0, -1).map(t => t.fileActions || null))")
+    check("file actions survive export → import", after == before, after[:300])
+    check("…and render again", page.locator(".step-card .file-action").count() == rows)
+    page.context.close()
+
+
 def autopilot_scenario(browser, port, state):
     print("— autopilot: even a delete of a user file commits without a hold")
     page = open_app(browser)
@@ -464,6 +542,7 @@ def main():
                 autopilot_scenario(browser, port, state)
                 streaming_scenario(browser, port, state)
                 phantom_scenario(browser, port, state)
+                files_scenario(browser, port, state, downloads=not exe)
             except AssertionError as e:
                 check(f"{name}: scenario completed", False, str(e))
             finally:

@@ -130,6 +130,14 @@ Caveats, stated honestly:
   data from a rejected step. On reject, the interpreter is therefore **restarted**,
   and the model is told its variables are gone (see §4.3).
 
+**File-action steps (§5.1) are gated *before* they apply.** Their effect is computed on
+the main thread from the canonical workspace, without running anything, so the same
+classification sees the diff while nothing has changed yet. A reject has nothing to roll
+back and the interpreter keeps its variables. In approve-each mode a file step waits too,
+reads included, because a read sends file content to the model. A committed file step is
+pushed to the worker with its `write` op when the worker held exactly the previous
+workspace; otherwise the next python step re-seeds it.
+
 ### 2.4 Checkpoints & rewind
 
 - A checkpoint is taken after every committed step. Storage is content-addressed (a
@@ -175,6 +183,9 @@ hermit-agent-session-2026-10-03-14-30.zip
   untruncated), the per-file changes with hashes, the risk verdict and its reasons,
   the decision, who made it, and timestamps. *(Built as a timeline rather than a bare
   `steps` list, so an import can rebuild the exact view.)*
+- per file-action step, `fileActions`: tool, path, ok, message, the line range of a read
+  and the old/new pairs of an edit. Written content isn't repeated: it is in the
+  workspace and checkpoint blobs, which the step's file chips point to;
 - file origins (`user`/`agent`) for the current workspace;
 - autonomy level, step limit, timeout, max tokens, reasoning effort;
 - non-secret connection settings: base URL and model name. **The API key is never
@@ -311,6 +322,45 @@ Parsing rules:
   spike, an optional tag made the loop execute a bare fence the model used to quote a
   timestamp, which failed as a syntax error.
 
+**File actions** *(added after the MVP)*. Writing a file from Python means escaping its
+source inside a string, changing one line means rewriting the file, and printing a file
+runs into the observation truncation. So a reply can instead hold any number of file
+actions, written as tags at the start of a line:
+
+```
+<read_file path="data.csv"/>                       numbered lines, 400 at a time
+<read_file path="app.py" start="120" end="200"/>
+<write_file path="report.md">
+full content
+</write_file>
+<edit_file path="app.py">
+<old>
+exact current text
+</old>
+<new>
+replacement
+</new>
+</edit_file>
+```
+
+- **Exclusive with code:** a reply holds file actions *or* one python block. A reply with
+  both is answered with an error observation and nothing runs. Tags are taken out before
+  the python fences are looked for, so a written README's ` ```python ` samples are
+  content, not code. The one limit: content can't contain its own closing tag.
+- **The executor** (`applyFileActions`) is separate from the parser
+  (`extractFileActions`) and runs on the main thread against the canonical workspace.
+  It works on an overlay, so a read sees an earlier write in the same reply. Writes and
+  edits are **all-or-nothing**: the first one that fails stops the batch and nothing is
+  written, and the model is told which action failed.
+- **Edits** need each `<old>` to occur exactly once. No match, a match only when
+  whitespace is ignored, and several matches are each reported with advice. `<old>` and
+  `<new>` are adapted to a CRLF file.
+- **Reads** are capped at 400 lines and 32 000 characters per read, 64 000 per reply,
+  and 2 000 per line. They end with where to continue. Binary files are refused, so
+  Python handles those. File-step output skips the §5.2 truncation, because the reads
+  are already capped.
+- Gating is in §2.3.
+
 ### 5.2 Observations
 Observations go back as a `user`-role message (OpenAI-schema compliant) in a fixed
 envelope:
@@ -349,6 +399,16 @@ When the endpoint supports OpenAI `tools`, offer `run_python(code)`,
 `ask_user(question)` and `finish(answer)` as tools. The executor, gating and timeline
 are identical; only the parsing layer changes. Auto-detect support (as HermitUI
 probes reasoning support), with code-as-action as the fallback.
+
+The file actions are ready for this. The tag names are the tool names, and the parser
+already emits the shape a tool call will produce, `{ tool, args }`, which
+`applyFileActions` consumes:
+
+| Tool | Arguments |
+|---|---|
+| `read_file` | `path` (string), `start_line`, `end_line` (integers ≥ 1, optional) |
+| `write_file` | `path`, `content` (strings) |
+| `edit_file` | `path` (string), `edits`: array of `{ old_text, new_text }` |
 
 ---
 

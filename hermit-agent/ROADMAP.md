@@ -194,6 +194,9 @@ Decisions taken without the owner are in [REVIEW_NOTES.md](REVIEW_NOTES.md).
 
 ## Phase 2 — Polish
 
+- [x] **File actions** (DESIGN §5.1): `<read_file>`, `<write_file>`, `<edit_file>`.
+      They run on the main thread, are gated before they apply, and are exclusive with
+      a python block. Covered by `tests/files.test.mjs` and the e2e `files_scenario`.
 - [ ] Per-file text diffs (line diff), image previews, a binary summary.
 - [ ] matplotlib capture (Agg plus a patched `show()`) with inline figures (§8).
 - [ ] Package-loading UX: import detection, timeline notes, an offline error.
@@ -210,7 +213,9 @@ screen.
 
 ## Phase 3 — Native tool calls
 
-- [ ] `run_python` / `ask_user` / `finish` as OpenAI `tools` (§5.5).
+- [ ] `run_python` / `ask_user` / `finish` as OpenAI `tools` (§5.5). `read_file`,
+      `write_file` and `edit_file` already have their argument shapes and a
+      protocol-independent executor; they only need the tool-call parsing.
 - [ ] Capability detection with code-as-action as the fallback.
 - [ ] The same timeline, gating and export; only the parsing changes.
 
