@@ -70,6 +70,8 @@ ${fn("buildFinalHistory")}
 ${fn("createThrottle")}
 ${fn("apiEndpoint")}
 ${fn("apiRoot")}
+${fn("normalizeApiUrl")}
+${fn("localIsoDate")}
 ${fn("parseReasoningTemplateSupport")}
 ${fn("buildReasoningParams")}
 ${fn("detectCloudProvider")}
@@ -82,17 +84,18 @@ ${fn("modelSupportsVision")}
 ${fn("modelReportsVision")}
 ${fn("extractModelId")}
 ${fn("normalizeGgufUrl")}
+${fn("ggufFileName")}
 ${fn("detectTemplateFromArch")}
 ${fn("buildWllamaPrompt")}
 function exportMd(messages) { ${exportBody()} return md; }
 export {
     SUMMARY_PREFIX, escapeHtml, unescapeHtml, contentToText, IMAGE_NOTE, withImageNote, parseChatExport,
     splitContextBlocks, exportMd,
-    parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint, apiRoot,
+    parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint, apiRoot, normalizeApiUrl, localIsoDate,
     parseReasoningTemplateSupport, buildReasoningParams,
     detectCloudProvider, isLocalEndpoint, describeRemoteEndpoint, chatErrorHint,
     isTextFile, isImageFile, modelSupportsVision,
-    modelReportsVision, extractModelId, normalizeGgufUrl, detectTemplateFromArch,
+    modelReportsVision, extractModelId, normalizeGgufUrl, ggufFileName, detectTemplateFromArch,
     buildWllamaPrompt,
 };
 `;

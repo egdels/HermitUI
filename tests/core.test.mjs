@@ -8,10 +8,10 @@ import H from "./extract.mjs";
 import { check, checkThrows, section, report } from "./check.mjs";
 
 const {
-    parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint,
+    parseThinkSegments, buildFinalHistory, createThrottle, apiEndpoint, normalizeApiUrl, localIsoDate,
     detectCloudProvider, isLocalEndpoint, describeRemoteEndpoint,
     isTextFile, isImageFile, modelSupportsVision,
-    modelReportsVision, extractModelId, normalizeGgufUrl, detectTemplateFromArch,
+    modelReportsVision, extractModelId, normalizeGgufUrl, ggufFileName, detectTemplateFromArch,
     IMAGE_NOTE, withImageNote,
     buildWllamaPrompt, apiRoot, parseReasoningTemplateSupport, buildReasoningParams,
     chatErrorHint,
@@ -71,6 +71,13 @@ section("1. think-tag parsing");
     check("empty input yields no segments", parseThinkSegments("").length === 0);
 }
 
+// The persona prompt pairs a local weekday with this date; toISOString() was UTC.
+section("1b. prompt date");
+{
+    const d = new Date(2026, 0, 5, 23, 59); // local 23:59 — in UTC that is the 6th anywhere west of Greenwich
+    check("local calendar date, zero-padded", localIsoDate(d) === "2026-01-05", localIsoDate(d));
+}
+
 // Servers that return reasoning in a separate field (reasoning_content) must have it
 // folded back into the stored text as a <think> block — but only once.
 section("2. final history rebuild");
@@ -106,6 +113,23 @@ section("3. API endpoint normalization");
         apiEndpoint("http://localhost:1234/v1/models", "/chat/completions") === "http://localhost:1234/v1/chat/completions");
     check("a pasted legacy /completions endpoint is not doubled",
         apiEndpoint("http://localhost:1234/v1/completions", "/chat/completions") === "http://localhost:1234/v1/chat/completions");
+}
+
+// fetch() resolves a scheme-less URL against the page, so on a hosted copy
+// "192.168.1.5:1234/v1" went to the page's own host — key and chat included.
+section("3b. API base URL scheme");
+{
+    check("LAN address without a scheme gets http",
+        normalizeApiUrl("192.168.1.5:1234/v1") === "http://192.168.1.5:1234/v1", normalizeApiUrl("192.168.1.5:1234/v1"));
+    check("bare localhost:port gets http (not parsed as a 'localhost:' scheme)",
+        normalizeApiUrl("localhost:1234/v1") === "http://localhost:1234/v1", normalizeApiUrl("localhost:1234/v1"));
+    check("remote host without a scheme gets https",
+        normalizeApiUrl("api.openai.com/v1") === "https://api.openai.com/v1", normalizeApiUrl("api.openai.com/v1"));
+    check("an explicit scheme is kept",
+        normalizeApiUrl("http://my-server.example:8080/v1") === "http://my-server.example:8080/v1");
+    check("surrounding whitespace stripped",
+        normalizeApiUrl("  https://api.x.ai/v1 ") === "https://api.x.ai/v1");
+    checkThrows("blank input rejected", () => normalizeApiUrl("   "), "Enter an API Base URL");
 }
 
 // The banner claims data leaves the machine, so a false positive is a lie to the user:
@@ -231,6 +255,12 @@ section("7. GGUF URL normalization");
     checkThrows("non-gguf target rejected", () => normalizeGgufUrl("https://example.com/model.bin"), ".gguf");
     checkThrows("split gguf rejected",
         () => normalizeGgufUrl("https://example.com/m-00001-of-00003.gguf"), "Split GGUFs");
+    checkThrows("unparseable URL rejected", () => normalizeGgufUrl("https://[bad.gguf"), "Not a valid URL");
+    check("file name is decoded",
+        ggufFileName("https://example.com/My%20Model.gguf?download=true") === "My Model.gguf");
+    // Runs at startup for #gguf= links; a throw here used to abort the rest of startup.
+    check("a malformed escape falls back to the raw name",
+        ggufFileName("https://example.com/bad%E0.gguf") === "bad%E0.gguf");
 }
 
 section("8. chat template selection");

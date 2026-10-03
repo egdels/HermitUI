@@ -23,11 +23,14 @@ node tests/core.test.mjs
 
 Covers, per numbered section: `parseThinkSegments` (closed/unclosed segments, unslashed
 `<|thought_end|>` closers, and half-arrived tags during streaming never flashing as literal
-text), `buildFinalHistory` (a separate `reasoning` field folded in exactly once),
-`apiEndpoint` (base URLs and pasted full endpoints), `detectCloudProvider` (providers match
+text), `localIsoDate` (the prompt's date line in local time), `buildFinalHistory` (a separate
+`reasoning` field folded in exactly once), `apiEndpoint` (base URLs and pasted full endpoints),
+`normalizeApiUrl` (a scheme-less base URL gets `http://`/`https://` instead of resolving
+against the page), `detectCloudProvider` (providers match
 as hostname suffixes — `mybox.ai` must not trip the `x.ai` warning), `isTextFile` /
 `isImageFile` (including SVG's deliberate exclusion), vision-model detection,
-`normalizeGgufUrl` (the three accepted URL shapes plus the rejections), and
+`normalizeGgufUrl` (the three accepted URL shapes plus the rejections), `ggufFileName`
+(a malformed `%` escape falls back to the raw name), and
 `detectTemplateFromArch` / `buildWllamaPrompt` (prompt wrapping asserted byte for byte,
 since a malformed prompt only shows up as a model answering badly). Section 10 covers
 `createThrottle`, which is timing-based and uses real timers. Section 14 covers

@@ -292,7 +292,14 @@ You do not have internet access, tools, or the ability to execute code. Answer f
 
 Your output is rendered as GitHub Flavored Markdown (tables, fenced code blocks with language tags, bold, lists). Respond in the same language the user writes in.
 
-Today is ${new Date().toLocaleDateString('en-US', {weekday:'long'})}, ${new Date().toISOString().slice(0,10)}.`;
+Today is ${new Date().toLocaleDateString('en-US', {weekday:'long'})}, ${localIsoDate(new Date())}.`;
+
+        // YYYY-MM-DD in local time. toISOString() is UTC, so near midnight it paired the
+        // local weekday above with the neighbouring day's date.
+        function localIsoDate(d) {
+            const pad = (n) => String(n).padStart(2, "0");
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        }
 
         const PERSONAS = {
             technical: {
@@ -673,9 +680,11 @@ Rules:
         // remote signal: a plain request probe cannot work, because permissive servers
         // answer 200 for parameters they silently ignore (verified — llama.cpp accepts a
         // deliberately bogus param), so "no error" proves nothing.
-        async function probeReasoningSupport() {
-            const root = apiRoot(API_URL);
-            const headers = { "Authorization": "Bearer " + API_KEY };
+        // Takes the endpoint explicitly: the button lives in the settings modal, so it must
+        // probe what is typed there, not the last-saved values.
+        async function probeReasoningSupport(url, key, model) {
+            const root = apiRoot(url);
+            const headers = { "Authorization": "Bearer " + key };
             try {
                 const res = await fetch(root + "/props", { headers });
                 if (res.ok) {
@@ -703,7 +712,7 @@ Rules:
                 const res = await fetch(root + "/api/show", {
                     method: "POST",
                     headers: Object.assign({ "Content-Type": "application/json" }, headers),
-                    body: JSON.stringify({ model: MODEL_NAME }),
+                    body: JSON.stringify({ model }),
                 });
                 if (res.ok) {
                     const info = await res.json();
@@ -724,7 +733,13 @@ Rules:
             btn.disabled = true;
             statusEl.textContent = "Reasoning support: checking…";
             try {
-                apiReasoning = await probeReasoningSupport();
+                const url = normalizeApiUrl(document.getElementById("settingUrl").value);
+                const key = document.getElementById("settingApiKey").value.trim() || "dummy";
+                const model = currentSettingsModel();
+                apiReasoning = await probeReasoningSupport(url, key, model);
+                // Remembered so Save can tell whether this result describes what is saved.
+                apiReasoning.probedUrl = url;
+                apiReasoning.probedModel = model;
                 apiReasoningRejected = false; // a fresh probe supersedes an earlier rejection
                 const label = {
                     supported: `✅ supported (via ${apiReasoning.source}, max "${apiReasoning.maxLevel}")`,
@@ -883,8 +898,9 @@ Rules:
                         canvas.width = width;
                         canvas.height = height;
                         canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-                        // JPEG for photos keeps payloads small; PNG source with alpha stays PNG.
-                        const outType = file.type === "image/png" ? "image/png" : "image/jpeg";
+                        // JPEG for photos keeps payloads small. Everything else may carry
+                        // alpha (PNG, WebP, GIF), which JPEG would flatten onto black.
+                        const outType = file.type === "image/jpeg" ? "image/jpeg" : "image/png";
                         resolve(canvas.toDataURL(outType, 0.85));
                     };
                     img.src = e.target.result;
@@ -925,6 +941,12 @@ Rules:
                 pendingFileReads++;
                 reader.onload = (e) => {
                     pendingFileReads--;
+                    // The name-based gate can be fooled (README.docx, a .ts video). Real
+                    // text never contains NUL; zip-based documents and media do, early on.
+                    if (e.target.result.includes("\u0000")) {
+                        showToast(`File ${file.name} looks binary, not text — not attached.`);
+                        return;
+                    }
                     attachedFiles.push({ name: file.name, kind: "text", content: e.target.result });
                     renderChips();
                 };
@@ -1172,18 +1194,21 @@ Rules:
             if (e.target === settingsModal) closeModalEl(settingsModal);
         });
         document.getElementById("settingsSave").addEventListener("click", () => {
+            // Validated before anything is applied, so a refused save changes nothing.
+            let newApiUrl;
+            try {
+                newApiUrl = normalizeApiUrl(document.getElementById("settingUrl").value);
+            } catch (err) {
+                showToast(`❌ ${err.message}`, { error: true });
+                return;
+            }
             // @wllama:start
             backendMode = document.getElementById("settingBackendMode").value;
             // @wllama:end
             const prevApiUrl = API_URL;
-            API_URL = document.getElementById("settingUrl").value.trim();
+            const prevModel = MODEL_NAME;
+            API_URL = newApiUrl;
             API_KEY = document.getElementById("settingApiKey").value.trim() || "dummy";
-            // A different endpoint invalidates whatever we learned about the old one.
-            if (API_URL !== prevApiUrl) {
-                apiReasoning = { state: "unknown", maxLevel: "high", levels: ["low", "medium", "high"], source: "not checked" };
-                apiReasoningRejected = false;
-                document.getElementById("reasoningProbeStatus").textContent = "Reasoning support: not checked";
-            }
 
             const modelSelect = document.getElementById("settingModelSelect");
             const modelInput = document.getElementById("settingModelInput");
@@ -1192,7 +1217,19 @@ Rules:
             } else {
                 MODEL_NAME = modelInput.value.trim();
             }
-            
+
+            // What we learned about reasoning support describes one server (and, for
+            // Ollama's /api/show, one model). A probe run from this modal before Save
+            // already describes the new values; anything else is stale.
+            if (API_URL !== prevApiUrl) apiReasoningRejected = false;
+            const stale = apiReasoning.probedUrl !== undefined
+                ? apiReasoning.probedUrl !== API_URL || apiReasoning.probedModel !== MODEL_NAME
+                : API_URL !== prevApiUrl || MODEL_NAME !== prevModel;
+            if (stale) {
+                apiReasoning = { state: "unknown", maxLevel: "high", levels: ["low", "medium", "high"], source: "not checked" };
+                document.getElementById("reasoningProbeStatus").textContent = "Reasoning support: not checked";
+            }
+
             let tempVal = parseFloat(document.getElementById("settingTemperature").value);
             TEMPERATURE = isNaN(tempVal) ? 0.7 : tempVal;
 
@@ -1442,6 +1479,8 @@ Rules:
                 // failing that, guess a sane format from the model architecture.
                 wllamaHasEmbeddedTemplate = false;
                 wllamaDetectedTemplate = "zephyr";
+                // Reset with the rest, or a failed metadata read keeps the previous model's levels.
+                wllamaReasoning = { supported: false, maxLevel: "high", levels: ["low", "medium", "high"] };
                 try {
                     const meta = await wllamaInstance.getModelMetadata();
                     const m = meta?.meta || meta || {};
@@ -1494,6 +1533,14 @@ Rules:
                 }
                 statusEl.textContent = "Status: Error - " + msg;
                 pbContainer.style.display = "none";
+                // A failure after the previous engine was shut down leaves nothing loaded;
+                // the header must stop naming the old model.
+                if (!wllamaInstance) {
+                    wllamaModelLabel = null;
+                    wllamaReasoning = { supported: false, maxLevel: "high", levels: ["low", "medium", "high"] };
+                    updateOverlay();
+                    updateThinkingControl();
+                }
             } finally {
                 window.Worker = OriginalWorker;
             }
@@ -1531,7 +1578,16 @@ Rules:
             if (/^https:\/\/huggingface\.co\//i.test(url)) url = url.replace(/\/blob\//, "/resolve/");
             if (!/\.gguf(\?.*)?$/i.test(url)) throw new Error("URL must point directly to a single .gguf file.");
             if (/-\d{5}-of-\d{5}\.gguf(\?.*)?$/i.test(url)) throw new Error("Split GGUFs (…-00001-of-000NN.gguf) aren't supported — pick a single-file quant.");
+            // Callers parse the result (new URL(url).host); reject what can't be parsed here.
+            try { new URL(url); } catch { throw new Error("Not a valid URL."); }
             return url;
+        }
+
+        // The file name shown in labels. decodeURIComponent throws on a malformed escape
+        // ("%E0"), and this runs at startup for #gguf= links — fall back to the raw text.
+        function ggufFileName(url) {
+            const seg = url.split("?")[0].split("/").pop();
+            try { return decodeURIComponent(seg); } catch { return seg; }
         }
 
         // A Blob whose bytes live in JS memory (a list of Uint8Array parts) instead
@@ -1669,7 +1725,7 @@ Rules:
                 statusEl.textContent = "Status: " + err.message;
                 return;
             }
-            const label = decodeURIComponent(url.split("?")[0].split("/").pop());
+            const label = ggufFileName(url);
             setWllamaLoadBusy(true);
             wllamaDownloadAbort = new AbortController();
             loadBtn.disabled = false;
@@ -1749,7 +1805,7 @@ Rules:
             // Same filename the file picker will show next session. Cross-origin
             // downloads ignore this attribute, but Hugging Face already sends
             // Content-Disposition, and it does apply to same-origin .gguf links.
-            link.setAttribute("download", decodeURIComponent(url.split("?")[0].split("/").pop()));
+            link.setAttribute("download", ggufFileName(url));
             hint.style.display = "";
         }
         document.getElementById("settingWllamaUrl").addEventListener("input", updateWllamaSaveCopyLink);
@@ -1769,7 +1825,7 @@ Rules:
             }
             document.getElementById("settingWllamaUrl").value = url;
             updateWllamaSaveCopyLink(); // setting .value doesn't fire "input"
-            document.getElementById("wllamaHashModelName").textContent = decodeURIComponent(url.split("?")[0].split("/").pop());
+            document.getElementById("wllamaHashModelName").textContent = ggufFileName(url);
             document.getElementById("wllamaHashHost").textContent = new URL(url).host;
             document.getElementById("wllamaHashBanner").style.display = "flex";
         }
@@ -1937,6 +1993,18 @@ Rules:
             return url;
         }
 
+        // A base URL typed without a scheme is resolved by fetch() as a path *relative to
+        // this page*: "192.168.1.5:1234/v1" on a hosted copy POSTed the chat and the API key
+        // to the page's own host, while the banner called it local. Supply the scheme the
+        // cloud/local warnings already assume — http for local hosts, https otherwise.
+        function normalizeApiUrl(raw) {
+            const url = String(raw || "").trim();
+            if (!url) throw new Error("Enter an API Base URL first, e.g. http://localhost:1234/v1.");
+            if (/^[a-z][a-z\d+.-]*:\/\//i.test(url)) return url;
+            // Probed with a scheme attached: bare "localhost:1234" parses as scheme "localhost:".
+            return (isLocalEndpoint("http://" + url) ? "http://" : "https://") + url;
+        }
+
         // Capability endpoints (/props, /api/show) live at the server root, not under
         // the OpenAI-compatible /v1 prefix, so strip that too.
         function apiRoot(base) {
@@ -2025,7 +2093,7 @@ Rules:
 
             try {
                 let currentKey = document.getElementById("settingApiKey").value.trim();
-                const modelsUrl = apiEndpoint(document.getElementById("settingUrl").value, "/models");
+                const modelsUrl = apiEndpoint(normalizeApiUrl(document.getElementById("settingUrl").value), "/models");
 
                 const response = await fetch(modelsUrl, {
                     method: "GET",
@@ -2039,7 +2107,9 @@ Rules:
                 }
 
                 const data = await response.json();
-                let models = data.data || [];
+                // Not `data.data || []`: that is always an array, so the fallbacks for a
+                // bare array or a { models: [...] } body could never run.
+                let models = data.data;
                 if (!Array.isArray(models)) {
                     models = Array.isArray(data) ? data : (data.models || []);
                 }
@@ -3067,7 +3137,8 @@ Rules:
                     const finalTps = genSecs > 0 ? (genTokens / genSecs).toFixed(1) : "0.0";
                     if (liveStatEl) liveStatEl.textContent = `${genTokens} tok · ${finalTps} tok/s`;
                     wllamaLog("log", `Generation done: ${genTokens} tokens in ${genSecs.toFixed(1)}s (${finalTps} tok/s)`);
-                    onDone(0, genTokens);
+                    // Stop tokens aren't streamed, so reaching the cap means it cut the reply off.
+                    onDone(0, genTokens, genTokens >= maxTokens ? "length" : "stop");
                 } catch (err) {
                     // Two shapes reach here: the Error("AbortError") thrown by our
                     // onData above, and wllama's own WllamaAbortError (name
@@ -3187,19 +3258,26 @@ Rules:
                          delta && delta.content);
                 };
 
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
+                try {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
 
-                    const text = decoder.decode(value, { stream: true });
-                    if (!sawStreamData && rawBody.length < 1048576) rawBody += text;
-                    buffer += text;
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop();
+                        const text = decoder.decode(value, { stream: true });
+                        if (!sawStreamData && rawBody.length < 1048576) rawBody += text;
+                        buffer += text;
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop();
 
-                    for (const line of lines) processLine(line);
+                        for (const line of lines) processLine(line);
+                    }
+                    if (buffer.trim()) processLine(buffer);
+                } catch (streamErr) {
+                    // An error frame throws out of the loop; without this the connection
+                    // stays open and the server keeps generating into the void.
+                    reader.cancel().catch(() => {});
+                    throw streamErr;
                 }
-                if (buffer.trim()) processLine(buffer);
 
                 // No SSE frame ever produced content: either the server ignored
                 // `stream: true` or a proxy buffered the whole thing into one JSON body.
@@ -3582,11 +3660,11 @@ Rules:
 
             const api = (params.get("api") || "").trim();
             if (api) {
-                API_URL = api;
-                let origin = api;
-                // Opaque origins (e.g. protocol-less input) stringify to "null" — show the raw value instead.
-                try { origin = new URL(api).origin; } catch { /* show as-is */ }
-                if (origin === "null") origin = api;
+                API_URL = normalizeApiUrl(api); // non-empty, so this never throws
+                let origin = API_URL;
+                // Opaque origins (e.g. an unusual scheme) stringify to "null" — show the raw value instead.
+                try { origin = new URL(API_URL).origin; } catch { /* show as-is */ }
+                if (origin === "null") origin = API_URL;
                 applied.push(`server ${origin}`);
             }
             const model = (params.get("model") || "").trim();
