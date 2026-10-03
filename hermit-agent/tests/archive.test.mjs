@@ -212,7 +212,7 @@ section("6. Compactions survive export and keep rewind possible");
     bad("compaction with a bad message", { task: "t", messages: [], timeline: [], compactions: [{ before: [{ role: "tool", content: "x" }], fromStep: 1, toStep: 1 }] }, "compaction 0 message 0");
     bad("compaction with bad steps", { task: "t", messages: [], timeline: [], compactions: [{ before: [], fromStep: 3, toStep: 1 }] }, "compaction 0");
     const v = X.validateSession({ task: "t", messages: [], timeline: [] });
-    check("older sessions: no compactions, defaults", v.compactions.length === 0 && v.settings.autoCompactPct === 75 && v.settings.contextSize === 0);
+    check("older sessions: no compactions, defaults", v.compactions.length === 0 && v.settings.autoCompactPct === 85 && v.settings.contextSize === 0);
     check("compaction threshold clamped", X.validateSession({ task: "t", messages: [], timeline: [], settings: { autoCompactPct: 500 } }).settings.autoCompactPct === 95);
 }
 

@@ -128,9 +128,10 @@ look.
 
 ## Context compaction (DESIGN §5.4, added after the MVP)
 
-- **Default 75 %, keep the last 4 steps, at least 2 steps per compaction.** At 75 % of
-  a 16 k context, the agent still has ~4 k for a reply. Lower the threshold if
-  `max_tokens` is large compared with the context.
+- **Default 85 %, keep the last 4 steps, at least 2 steps per compaction.** 85 % was
+  chosen by the owner (first built at 75 %). It leaves ~2.4 k of a 16 k context for a
+  reply. A longer reply that overflows is caught by the overflow fallback. Lower
+  the threshold if `max_tokens` is large compared with the context.
 - **The token estimate is calibrated, not counted.** No tokenizer runs in the page. The
   previous request's `prompt_tokens` per character is used, which also covers the chat
   template's overhead. After an import, chars ÷ 3.5 is used until the first request.

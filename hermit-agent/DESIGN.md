@@ -406,7 +406,7 @@ The user's custom instructions are appended after it, like HermitUI personas.
   doesn't rely on stale memory of the workspace.
 
 *As built (auto-compaction; elision and the periodic listing are still open):*
-- **Setting:** *Auto-compact at (%)*, default 75, 0 = off, and *Context size*, default
+- **Setting:** *Auto-compact at (%)*, default 85, 0 = off, and *Context size*, default
   0 = the server's `n_ctx` from llama.cpp's `/props`. Both are exported with the session.
 - **Trigger:** before each request, the prompt is estimated as characters times the
   tokens per character the previous request measured (`prompt_tokens` / characters

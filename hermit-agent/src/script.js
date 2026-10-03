@@ -1166,7 +1166,7 @@ function validateSession(raw) {
             autonomy: ["approve", "risk", "autopilot"].includes(st.autonomy) ? st.autonomy : "risk",
             stepLimit: num(st.stepLimit, 20), stepTimeoutSec: num(st.stepTimeoutSec, 60),
             maxTokens: num(st.maxTokens, 8192), effort: ["off", "low", "medium", "high", "default"].includes(st.effort) ? st.effort : "low",
-            autoCompactPct: Math.min(95, Math.max(0, num(st.autoCompactPct, 75))), contextSize: Math.max(0, num(st.contextSize, 0)),
+            autoCompactPct: Math.min(95, Math.max(0, num(st.autoCompactPct, 85))), contextSize: Math.max(0, num(st.contextSize, 0)),
         },
     };
 }
@@ -1632,7 +1632,7 @@ const SETTINGS = {
     autonomy: "risk", stepLimit: 20, stepTimeoutSec: 60, maxTokens: 8192, effort: "low",
     // DESIGN §5.4: summarise older steps at this % of the context (0 = off), measured
     // against contextSize, or the server's n_ctx when that is 0.
-    autoCompactPct: 75, contextSize: 0,
+    autoCompactPct: 85, contextSize: 0,
 };
 
 // The canonical workspace (DESIGN §4.1): path -> { hash, origin }, content-addressed blobs.
@@ -3032,7 +3032,7 @@ function saveSettings() {
     SETTINGS.stepLimit = int("settingStepLimit", 1, 500, 20);
     SETTINGS.stepTimeoutSec = int("settingTimeout", 1, 3600, 60);
     SETTINGS.maxTokens = int("settingMaxTokens", 0, 1000000, 8192);
-    SETTINGS.autoCompactPct = int("settingAutoCompact", 0, 95, 75);
+    SETTINGS.autoCompactPct = int("settingAutoCompact", 0, 95, 85);
     SETTINGS.contextSize = int("settingContextSize", 0, 10000000, 0);
     RUN.compactAfter = 0;
     if (S.messages.length && S.messages[0].role === "system") S.messages[0].content = buildSystemPrompt(SETTINGS.instructions);
