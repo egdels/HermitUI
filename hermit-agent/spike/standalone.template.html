@@ -182,7 +182,10 @@ async function bootWorker() {
   try {
     let t0 = performance.now();
     const inl = window.__PYODIDE_INLINE__;
-    if (!inl) throw new Error("No inlined Pyodide: this is the template. Run build_standalone.py and open build/pyodide-standalone.html.");
+    if (!inl) {
+      logEl.insertAdjacentHTML("beforebegin", '<p><b><a href="build/pyodide-standalone.html">Open the built page</a></b></p>');
+      throw new Error("No inlined Pyodide: this is the template. Run build_standalone.py and open build/pyodide-standalone.html.");
+    }
     const dec = new TextDecoder();
     core = {
       loaderJs: dec.decode(await gunzipToBytes(inl["pyodide.js"])),
