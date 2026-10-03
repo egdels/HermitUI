@@ -24,6 +24,23 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <!-- Debug console: drops down from the top; toggled by the 🐛 header button. -->
+    <div id="debugConsole" aria-hidden="true">
+        <div class="dc-header">
+            <span class="dc-title">🐛 Debug console</span>
+            <label class="dc-filter">Show
+                <select id="debugFilter" title="Which events to show">
+                    <option value="tools" selected>Tool calls</option>
+                    <option value="model">Tool calls + model requests</option>
+                    <option value="all">Everything</option>
+                </select>
+            </label>
+            <span class="dc-spacer"></span>
+            <button type="button" id="debugClear" class="dc-btn">Clear</button>
+            <button type="button" id="debugClose" class="dc-btn" title="Close" aria-label="Close the debug console">✕</button>
+        </div>
+        <div id="debugLog" class="dc-log" role="log" aria-label="Debug log"></div>
+    </div>
     <header class="app-header">
         <div class="brand">
             <h1>HermitUI Agent <span class="version-badge" id="versionBadge">v0.1.0</span></h1>
@@ -33,6 +50,7 @@
             <button type="button" class="header-btn" id="newSessionBtn" title="New session">➕ New</button>
             <button type="button" class="header-btn" id="importBtn" title="Import a session (.zip)">📂 Import</button>
             <button type="button" class="header-btn" id="exportBtn" title="Export the session or the workspace">💾 Export</button>
+            <button type="button" class="header-btn icon-only" id="debugBtn" title="Debug console: tool calls and model requests" aria-label="Toggle the debug console" aria-pressed="false">🐛</button>
             <button type="button" class="header-btn icon-only" id="themeBtn" title="Toggle dark mode" aria-label="Toggle dark mode">🌓</button>
             <button type="button" class="header-btn icon-only" id="settingsBtn" title="Settings" aria-label="Settings">⚙️</button>
             <input type="file" id="importInput" accept=".zip,application/zip" hidden>

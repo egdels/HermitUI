@@ -1191,6 +1191,7 @@ function workerCall(op, payload, timeoutMs) {
 }
 
 function setInterpreterState(state) {
+    if (PY.state !== state && typeof debugLog === "function") debugLog("interp", "python interpreter: " + state + (state === "idle" && PY.info && PY.info.bootMs && PY.state === "booting" ? ` (booted in ${PY.info.bootMs} ms)` : ""));
     PY.state = state;
     if (typeof renderStatusBar === "function") renderStatusBar();
 }
@@ -1528,7 +1529,8 @@ function freshSession() {
     };
 }
 let S = freshSession();
-const RUN = { active: false, abort: null, stopRequested: false, decision: null, activeSince: 0, modelNotes: [] };
+// step: the step being worked on; activity: what it's doing right now, for the status bar.
+const RUN = { active: false, abort: null, stopRequested: false, decision: null, activeSince: 0, modelNotes: [], step: 0, activity: "" };
 
 function workspaceSize() {
     let total = 0;
@@ -1601,6 +1603,12 @@ function setStatus(status) {
     updateComposer();
 }
 
+function setActivity(activity) {
+    if (RUN.activity === activity) return;
+    RUN.activity = activity;
+    renderStatusBar();
+}
+
 function flushModelNotes() {
     if (!RUN.modelNotes.length) return;
     appendToLastUserMessage(S.messages, RUN.modelNotes.map(n => "Note: " + n).join("\n"));
@@ -1608,6 +1616,8 @@ function flushModelNotes() {
 }
 
 function waitForDecision(idx) {
+    const item = S.timeline[idx];
+    debugLog("decision", "held for your approval", item && item.risk && item.risk.reasons.length ? "Why: " + item.risk.reasons.join("; ") : "Approve each step is on.");
     return new Promise((resolve) => { RUN.decision = { idx, resolve }; });
 }
 
@@ -1615,6 +1625,7 @@ function resolveDecision(decision) {
     const d = RUN.decision;
     if (!d) return;
     RUN.decision = null;
+    debugLog("decision", "you chose: " + decision.action + (decision.reason ? " — " + decision.reason : ""), decision.action === "edit" && decision.code ? decision.code : "");
     d.resolve(decision);
 }
 
@@ -1660,8 +1671,9 @@ function submitUserText(text) {
     runLoop();
 }
 
+// Never lowers the budget: Continue after a Stop or an error mid-budget keeps what's left.
 function continueAfterLimit() {
-    S.stepBudget = S.stepCount + LIMITS.stepLimitIncrement;
+    S.stepBudget = Math.max(S.stepBudget, S.stepCount + LIMITS.stepLimitIncrement);
     runLoop();
 }
 
@@ -1705,6 +1717,8 @@ async function runLoop() {
         S.activeMs += Date.now() - RUN.activeSince;
         RUN.active = false;
         RUN.abort = null;
+        RUN.step = 0;
+        RUN.activity = "";
         renderStatusBar();
         updateComposer();
         renderTimeline();   // re-enable rewind buttons
@@ -1715,6 +1729,9 @@ async function runLoop() {
 // "stopped" | "error".
 async function agentTurn() {
     const n = S.stepCount + 1;
+    RUN.step = n;
+    setActivity("thinking");
+    debugLog("model", `→ request to ${SETTINGS.model || "default model"} · ${S.messages.length} messages · effort ${SETTINGS.effort}`);
     const step = addTimelineItem({
         type: "step", n, phase: "thinking", kind: "", reasoning: "", content: "", prose: "",
         notes: [], netAttempts: [], startedAt: nowIso(), changes: null, risk: null,
@@ -1738,6 +1755,7 @@ async function agentTurn() {
             apiReasoning += r;
             rawContent += c;
             const split = splitReply(rawContent, false);
+            if (split.text && RUN.activity === "thinking") setActivity("writing");
             step.reasoning = [apiReasoning, split.reasoning].filter(Boolean).join("\n\n");
             step.content = split.text;
             render(() => renderTimelineItem(idx));
@@ -1746,7 +1764,8 @@ async function agentTurn() {
         render.cancel();
         S.timeline.splice(idx, 1);
         renderTimeline();
-        if (e.name === "AbortError") { addNote("⏹ Stopped the model request."); setStatus("stopped"); return "stopped"; }
+        if (e.name === "AbortError") { debugLog("model", "request aborted"); addNote("⏹ Stopped the model request."); setStatus("stopped"); return "stopped"; }
+        debugLog("error", "model request failed: " + (e.message || e));
         const hint = chatErrorHint(e.message, { apiUrl: SETTINGS.apiUrl, mixedContent: isBlockedMixedContent(SETTINGS.apiUrl) });
         addTimelineItem({ type: "error", text: e.message || String(e), hint });
         setStatus("error");
@@ -1764,6 +1783,7 @@ async function agentTurn() {
     step.stats = buildStepStats(result.rawUsage, result.timings, result.clock, REASONING.nCtx);
     const parsed = parseReply(split.text, result.finishReason);
     step.kind = parsed.kind;
+    debugLog("model", `← reply · finish ${result.finishReason || "?"} · ${result.usage.completion} tok · ${((result.clock.endMs - result.clock.startMs) / 1000).toFixed(1)} s → ${parsed.kind}`, clipForDebug(split.text, 4000));
     // The history keeps the visible reply only; reasoning isn't sent back.
     S.messages.push({ role: "assistant", content: split.text });
     S.stepCount = n;
@@ -1779,12 +1799,14 @@ async function agentTurn() {
             step.phase = "done";
             step.endedAt = nowIso();
             const list = missing.join(", ");
+            debugLog("tool", "final_answer → sent back: mentions missing " + list);
             step.notes = [`The answer mentions ${list}, which ${missing.length === 1 ? "isn't" : "aren't"} in the workspace. The agent was asked to check.`];
             S.messages.push({ role: "user", content: buildObservation({ step: n, status: "error", notes: [`Your answer mentions ${list}, but /workspace has no such file${missing.length === 1 ? "" : "s"}. Files that exist: ${[...WS.files.keys()].join(", ") || "(none)"}. Create the missing file${missing.length === 1 ? "" : "s"} with <write_file> or code, or correct your answer.`] }) });
             step.checkpoint = takeCheckpoint("step " + n);
             renderTimelineItem(idx);
             return "continue";
         }
+        debugLog("tool", "final_answer", clipForDebug(parsed.prose || split.text, 4000));
         step.phase = "done";
         step.endedAt = nowIso();
         step.checkpoint = takeCheckpoint("step " + n);
@@ -1793,6 +1815,7 @@ async function agentTurn() {
         return "done";
     }
     if (parsed.kind === "ask") {
+        debugLog("tool", "ask_user", parsed.question);
         step.question = parsed.question;
         step.prose = parsed.prose;
         step.phase = "done";
@@ -1813,6 +1836,7 @@ async function agentTurn() {
                 : "Your reply had an unclosed ```python block, so nothing ran. Reply with ONE complete ```python block.",
             mixed: "Your reply had both file actions and a ```python block, so nothing ran. Send file actions and code in separate replies: first the file actions, then the code once you have their results.",
         }[parsed.kind];
+        debugLog("error", "no tool call (" + parsed.kind + ")", why);
         step.prose = parsed.prose || "";
         step.status = parsed.kind;
         step.phase = "done";
@@ -1835,6 +1859,7 @@ async function agentTurn() {
         if (parsed.blockCount > 1) notes.push(`Only the first of your ${parsed.blockCount} code blocks was run.`);
         outcome = await executeStep(step, idx, notes);
     }
+    debugLog("result", `step ${n} done · ${step.status || "?"} · ${step.decision || "no decision"} · changes: ${formatChanges(step.changes)}`);
     step.phase = "done";
     step.endedAt = nowIso();
     S.messages.push({ role: "user", content: outcome.observation });
@@ -1869,10 +1894,14 @@ async function executeStep(step, idx, notes) {
     for (;;) {
         step.ranCode = code;
         step.phase = "running";
+        setActivity("python");
+        debugLog("tool", `python · ${code.split("\n").length} lines${allowNetwork ? " · network allowed" : ""}`, code);
+        const t0 = performance.now();
         renderTimelineItem(idx);
         const r = await runInWorker(code, { allowNetwork, timeoutMs: SETTINGS.stepTimeoutSec * 1000 });
         step.notes = [...notes, ...(r.notes || [])];
         step.netAttempts = r.netAttempts || [];
+        debugLog(r.status === "ok" ? "result" : "error", `python → ${r.status} · ${Math.round(performance.now() - t0)} ms` + (step.netAttempts.length ? ` · ${step.netAttempts.length} blocked network attempt(s)` : ""), clipForDebug(r.output, 4000) + (step.netAttempts.length ? "\n\nBlocked: " + step.netAttempts.join(", ") : ""));
         if (step.edited) step.notes.push("The user edited your code before it ran. The code that ran:\n```python\n" + code.replace(/\n$/, "") + "\n```");
         if (r.status === "timeout" || r.status === "killed" || r.status === "crashed") {
             const why = {
@@ -1942,7 +1971,15 @@ async function executeStep(step, idx, notes) {
 // Returns { observation, stop }.
 async function executeFileStep(step, idx, actions, notes) {
     const ws = { paths: [...WS.files.keys()], read: (p) => { const f = WS.files.get(p); return f ? WS.blobs.get(f.hash) || null : null; } };
+    setActivity("files");
     const applied = applyFileActions(actions, ws);
+    for (const r of applied.results) {
+        const edits = r.edits ? ` · ${r.edits.length} edit${r.edits.length === 1 ? "" : "s"}` : "";
+        debugLog(r.ok ? "tool" : "error", `${r.tool} ${r.path}${edits} → ${r.ok ? "ok" : "failed"}${r.message ? ": " + r.message : ""}`,
+            r.edits ? clipForDebug(r.edits.map((e, i) => `--- edit ${i + 1}: old\n${e.old}\n+++ new\n${e.new}`).join("\n\n"), 4000)
+                : r.tool === "write_file" && applied.writes.has(r.path) ? clipForDebug(applied.writes.get(r.path), 4000)
+                : r.output ? clipForDebug(r.output, 4000) : "");
+    }
     step.fileActions = applied.results.map(r => {
         const a = { tool: r.tool, path: r.path, ok: r.ok, message: r.message };
         if (r.startLine) { a.startLine = r.startLine; a.endLine = r.endLine; }
@@ -2626,6 +2663,64 @@ function confirmDialog(text, okLabel) {
     });
 }
 
+// ---------- Debug console ----------
+// A drop-down log of what the agent does: model requests, every tool call (python,
+// read_file / write_file / edit_file, final answer, ask), their results and the gate
+// decisions. Kept in memory only (never exported), capped, and rendered while open.
+const DEBUG = { entries: [], max: 1000, filter: "tools" };
+const DEBUG_GROUPS = { tools: ["tool", "result", "decision", "error"], model: ["tool", "result", "decision", "error", "model"], all: null };
+
+function debugLog(kind, text, detail) {
+    const entry = { ts: new Date(), step: RUN.active && RUN.step ? RUN.step : S.stepCount, kind, text: String(text), detail: detail ? String(detail) : "" };
+    DEBUG.entries.push(entry);
+    if (DEBUG.entries.length > DEBUG.max) DEBUG.entries.shift();
+    const panel = $("debugLog");
+    if (panel && $("debugConsole").classList.contains("open") && debugVisible(entry)) {
+        const stick = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 8;
+        panel.appendChild(buildDebugLine(entry));
+        while (panel.childElementCount > DEBUG.max) panel.removeChild(panel.firstElementChild);
+        if (stick) panel.scrollTop = panel.scrollHeight;
+    }
+}
+
+function debugVisible(entry) {
+    const g = DEBUG_GROUPS[DEBUG.filter];
+    return !g || g.includes(entry.kind);
+}
+
+function buildDebugLine(entry) {
+    const line = el("div", "dc-line dc-" + entry.kind);
+    const t = entry.ts.toLocaleTimeString([], { hour12: false }) + "." + String(entry.ts.getMilliseconds()).padStart(3, "0");
+    const head = el("span", "dc-head", `${t}  #${entry.step}  ${entry.kind.padEnd(8)} ${entry.text}`);
+    if (!entry.detail) { line.appendChild(head); return line; }
+    const det = document.createElement("details");
+    const sum = document.createElement("summary");
+    sum.appendChild(head);
+    det.append(sum, el("pre", "dc-detail", entry.detail));
+    line.appendChild(det);
+    return line;
+}
+
+function renderDebugLog() {
+    const panel = $("debugLog");
+    panel.replaceChildren(...DEBUG.entries.filter(debugVisible).map(buildDebugLine));
+    if (!panel.childElementCount) panel.appendChild(el("div", "dc-empty", "Nothing logged yet. Tool calls show up here as the agent works."));
+    panel.scrollTop = panel.scrollHeight;
+}
+
+function setDebugConsole(open) {
+    $("debugConsole").classList.toggle("open", open);
+    $("debugConsole").setAttribute("aria-hidden", open ? "false" : "true");
+    $("debugBtn").classList.toggle("active", open);
+    $("debugBtn").setAttribute("aria-pressed", open ? "true" : "false");
+    if (open) renderDebugLog();
+}
+
+function clipForDebug(text, max) {
+    const s = String(text || "");
+    return s.length > max ? s.slice(0, max) + `\n… (${s.length - max} more chars)` : s;
+}
+
 // ---------- Status bar, header, composer ----------
 function formatDuration(ms) {
     const s = Math.floor(ms / 1000);
@@ -2634,19 +2729,28 @@ function formatDuration(ms) {
     return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+const ACTIVITY_LABELS = { thinking: "model thinking…", writing: "model writing…", python: "running Python", files: "file actions" };
 const STATE_LABELS = { idle: "ready", running: "working", "awaiting-approval": "waiting for you", "awaiting-user": "question for you", done: "done", stopped: "stopped", paused: "paused", error: "error" };
 const INTERP_LABELS = { off: "not started", booting: "booting…", idle: "idle", running: "running", failed: "failed" };
 
 function renderStatusBar() {
     if (!$("statStep")) return;
-    $("statStep").textContent = `Step ${S.stepCount}${S.stepBudget ? " / " + S.stepBudget : ""}`;
+    // While a run is on, show the step being worked on (the card's number), not the
+    // last finished one. The limit is where the run pauses; follow-ups move it on.
+    const cur = RUN.active && RUN.step ? RUN.step : S.stepCount;
+    $("statStep").textContent = `Step ${cur}${S.stepBudget ? " · pauses at " + S.stepBudget : ""}`;
+    $("statStep").title = S.stepBudget
+        ? `The agent pauses after step ${S.stepBudget}. Each new instruction or follow-up allows ${SETTINGS.stepLimit} more steps (Settings → Step limit); Continue at the limit allows ${LIMITS.stepLimitIncrement} more.`
+        : "";
     const active = S.activeMs + (RUN.active ? Date.now() - RUN.activeSince : 0);
     $("statTime").textContent = "⏱ " + formatDuration(active);
     const tok = S.tokens.prompt + S.tokens.completion;
     $("statTokens").textContent = "🔢 " + (tok >= 1000 ? (tok / 1000).toFixed(1) + "k" : tok) + " tokens";
-    $("statInterp").textContent = "🐍 " + (INTERP_LABELS[PY.state] || PY.state);
+    $("statInterp").textContent = "🐍 Python " + (INTERP_LABELS[PY.state] || PY.state);
+    $("statInterp").title = "The Python interpreter. It is idle while the model thinks and busy only while a code step runs, which usually takes well under a second.";
     $("statInterp").dataset.state = PY.state;
-    $("statState").textContent = STATE_LABELS[S.status] || S.status;
+    const label = STATE_LABELS[S.status] || S.status;
+    $("statState").textContent = S.status === "running" && RUN.active && ACTIVITY_LABELS[RUN.activity] ? `${label} · ${ACTIVITY_LABELS[RUN.activity]}` : label;
     $("statState").dataset.state = S.status;
 }
 
@@ -2988,7 +3092,12 @@ function wireEvents() {
         if (e.key !== "Escape") return;
         const open = document.querySelector(".modal-overlay.active");
         if (open) { if (open.id === "confirmModal") $("confirmCancel").click(); else closeModal(open.id); }
+        else if ($("debugConsole").classList.contains("open")) setDebugConsole(false);
     });
+    $("debugBtn").addEventListener("click", () => setDebugConsole(!$("debugConsole").classList.contains("open")));
+    $("debugClose").addEventListener("click", () => setDebugConsole(false));
+    $("debugClear").addEventListener("click", () => { DEBUG.entries = []; renderDebugLog(); });
+    $("debugFilter").addEventListener("change", (e) => { DEBUG.filter = e.target.value; renderDebugLog(); });
     window.addEventListener("beforeunload", (e) => {
         if (!S.timeline.length && !WS.files.size) return;
         e.preventDefault();

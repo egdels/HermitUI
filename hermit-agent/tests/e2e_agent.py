@@ -477,6 +477,16 @@ def files_scenario(browser, port, state, downloads=True):
     rows = page.locator(".step-card .file-action").count()
     check("one row per file action", rows == 5, rows)
     check("the edit's old/new pair is in the card", page.locator(".step-card .edit-pair").count() == 2)
+    check("status bar shows the step and where the run pauses", page.inner_text("#statStep") == "Step 8 · pauses at 20", page.inner_text("#statStep"))
+    page.click("#debugBtn")
+    log = page.inner_text("#debugLog")
+    check("debug console lists every tool call",
+          all(s in log for s in ["write_file hello.py", "read_file notes.txt", "edit_file hello.py · 1 edit", "python · ", "python → ok", "final_answer", "held for your approval", "you chose: reject — leave my notes alone"]), log[:2000])
+    check("…and hides model requests by default", "→ request to" not in log)
+    page.select_option("#debugFilter", "model")
+    check("…which the filter shows", "→ request to mock-model" in page.inner_text("#debugLog"))
+    page.keyboard.press("Escape")
+    check("Escape closes the debug console", page.evaluate("() => !$('debugConsole').classList.contains('open')"))
 
     if not downloads:
         page.context.close()

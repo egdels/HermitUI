@@ -63,8 +63,16 @@ This is the core of the product. Everything else serves it.
   in the latest step are highlighted. Clicking a file opens a viewer: text with
   highlighting, image previews, or hex/size info for other binaries. Files can be
   uploaded by drag-drop and downloaded individually or as a zip.
-- **Status bar.** Step N of the limit, elapsed time, tokens, interpreter state
-  (booting / idle / running / killed).
+- **Status bar.** The step being worked on and the step the run pauses at (each
+  instruction or follow-up moves that point on by the step limit; Continue at the
+  limit by 10, and never lowers it), what the agent is doing right now (model
+  thinking / writing, running Python, file actions), elapsed time, tokens, and the
+  interpreter state (booting / idle / running / failed). The interpreter is idle
+  while the model thinks, which is most of the time.
+- **Debug console.** A 🐛 header button drops down a log of every tool call (python,
+  `read_file` / `write_file` / `edit_file`, final answer, ask) with its arguments and
+  result, the gate decisions, and optionally the model requests and interpreter
+  state changes. In memory only, capped at 1000 entries, never exported.
 
 ### 2.2 What the user controls
 

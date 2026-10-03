@@ -120,6 +120,7 @@ button, select, input, textarea { font: inherit; color: inherit; }
 }
 .header-btn { padding: 7px 12px; font-size: 0.85rem; }
 .header-btn.icon-only { padding: 7px 9px; }
+.header-btn.active { color: var(--primary); border-color: var(--primary); }
 .header-btn:hover, .small-btn:hover, .action-btn:hover, .card-btn:hover {
     color: var(--primary);
     border-color: var(--primary);
@@ -150,6 +151,83 @@ button, select, input, textarea { font: inherit; color: inherit; }
 #statState[data-state="error"] { color: var(--danger); }
 #statInterp[data-state="running"] { color: var(--primary); }
 #statInterp[data-state="failed"] { color: var(--danger); }
+
+/* ---------- Debug console: drops down from the top (adapted from HermitUI's) ---------- */
+#debugConsole {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 900;
+    height: 45vh;
+    max-height: 480px;
+    display: flex;
+    flex-direction: column;
+    background: rgba(11, 14, 20, 0.86);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+    color: #c9d1d9;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    transform: translateY(-100%);
+    visibility: hidden;
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s linear 0.28s;
+}
+#debugConsole.open {
+    transform: translateY(0);
+    visibility: visible;
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 14px 44px rgba(0, 0, 0, 0.5);
+}
+.dc-header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    flex-shrink: 0;
+    padding: 8px 14px;
+    font-size: 0.8rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.dc-title { font-weight: 600; letter-spacing: 0.02em; }
+.dc-filter { display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem; }
+.dc-filter select, .dc-btn {
+    background: rgba(255, 255, 255, 0.08);
+    color: #c9d1d9;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 0.72rem;
+    font-family: inherit;
+    cursor: pointer;
+    color-scheme: dark;
+}
+.dc-btn:hover { background: rgba(255, 255, 255, 0.18); }
+.dc-spacer { flex: 1; }
+.dc-log {
+    flex: 1;
+    overflow: auto;
+    padding: 8px 14px;
+    font-size: 0.74rem;
+    line-height: 1.55;
+}
+.dc-line { white-space: pre-wrap; word-break: break-word; }
+.dc-line summary { cursor: pointer; list-style-position: outside; }
+.dc-line summary:hover .dc-head { text-decoration: underline dotted; }
+.dc-detail {
+    margin: 2px 0 6px 2ch;
+    padding: 6px 10px;
+    max-height: 240px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: rgba(255, 255, 255, 0.05);
+    border-left: 2px solid rgba(255, 255, 255, 0.18);
+    border-radius: 4px;
+    font: inherit;
+    color: #aeb7c2;
+}
+.dc-empty { color: #8b949e; font-style: italic; }
+.dc-tool .dc-head { color: #79c0ff; }
+.dc-result .dc-head { color: #7ee787; }
+.dc-decision .dc-head { color: #e3b341; }
+.dc-error .dc-head { color: #f85149; }
+.dc-model .dc-head { color: #d2a8ff; }
+.dc-interp .dc-head { color: #8b949e; }
 
 /* ---------- Layout: timeline + workspace. Wraps instead of breakpoints. ---------- */
 .layout {
