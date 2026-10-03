@@ -10,7 +10,8 @@ gating or export; that is Phase 1 proper.
 
 Try your own task (the files are copied into /workspace; when it finishes the
 workspace is saved to out/<timestamp>/, and you can answer `ask:` questions and
-send follow-ups on the terminal):
+send follow-ups on the terminal). Reasoning effort defaults to low (--effort, or
+/effort at the prompt); xhigh can burn the whole --max-tokens budget on one step:
 
     ../../benchmark/.venv/bin/python agent_loop.py --task "chart the monthly totals" --file data.csv
 """
@@ -39,6 +40,7 @@ Environment: Pyodide (CPython compiled to WebAssembly) running in a browser.
 - The working directory is /workspace. Files the user gave you are there.
 - The standard library is available. numpy, pandas and matplotlib are loaded automatically when you import them. There is no pip and no network access. input() does not work.
 - Variables persist between your steps.
+- It is a 32-bit platform: numpy's default integer is int32 and overflows silently past 2**31. Use dtype=np.int64 (or plain Python ints) for large values.
 
 Every reply must be exactly ONE of:
 1. Short reasoning, then exactly ONE ```python code block. It is executed and you get its output back in an <observation> message. Write nothing after the code block.
@@ -136,8 +138,37 @@ def observation(step, r, note=""):
     return f'<observation step="{step}" status="{r["status"]}">\n{body}\nfiles changed: {files}\n</observation>'
 
 
-def chat(base_url, model, messages, max_tokens):
-    body = {"messages": messages, "max_tokens": max_tokens}
+EFFORTS = ("off", "low", "medium", "high", "default")
+
+
+def template_effort_levels(base_url):
+    """The reasoning_effort values the chat template accepts, read from llama.cpp's
+    /props like HermitUI's parseReasoningTemplateSupport. Qwen3.5/3.8 accept exactly
+    ('xhigh', 'medium', 'low') and raise on anything else. None if unknown."""
+    root = re.sub(r"/v1/?$", "", base_url.rstrip("/"))
+    try:
+        with urllib.request.urlopen(root + "/props", timeout=10) as resp:
+            template = json.load(resp).get("chat_template") or ""
+    except Exception:
+        return None
+    m = re.search(r"reasoning_effort\w*\s+not\s+in\s+\(([^)]*)\)", template)
+    return re.findall(r"['\"](\w+)['\"]", m.group(1)) if m else None
+
+
+def reasoning_params(effort, levels):
+    """Same mapping as HermitUI's buildReasoningParams (remote backend). "high" means
+    the template's maximum; a level the template doesn't list is dropped, not sent."""
+    if effort == "off":
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    if effort == "default":
+        return {}
+    levels = levels or ["low", "medium", "high"]
+    wanted = "xhigh" if effort == "high" and "xhigh" in levels else effort
+    return {"reasoning_effort": wanted} if wanted in levels else {}
+
+
+def chat(base_url, model, messages, max_tokens, extra):
+    body = {"messages": messages, "max_tokens": max_tokens, **extra}
     if model:
         body["model"] = model
     req = urllib.request.Request(
@@ -147,8 +178,10 @@ def chat(base_url, model, messages, max_tokens):
     )
     with urllib.request.urlopen(req, timeout=900) as resp:
         data = json.load(resp)
-    msg = data["choices"][0]["message"]
-    return msg.get("content") or "", msg.get("reasoning_content") or "", data.get("usage", {})
+    choice = data["choices"][0]
+    msg = choice["message"]
+    return (msg.get("content") or "", msg.get("reasoning_content") or "",
+            data.get("usage", {}), choice.get("finish_reason"))
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -177,11 +210,20 @@ def agent_loop(page, args, messages, stats):
         step = stats["steps"] + 1
         print(f"  step {step}: asking model …")
         t0 = time.time()
-        content, reasoning, usage = chat(args.base_url, args.model, messages, args.max_tokens)
+        extra = reasoning_params(args.effort, args.effort_levels)
+        content, reasoning, usage, finish = chat(args.base_url, args.model, messages, args.max_tokens, extra)
         stats["llm_s"] += time.time() - t0
         stats["tokens"] += usage.get("completion_tokens", 0)
         if reasoning:
             print(f"    reasoning: {len(reasoning)} chars")
+        if not content.strip():
+            # Typically the whole --max-tokens budget went on reasoning. Retrying the
+            # same request would just do it again, so stop and let the user decide.
+            why = (f"hit --max-tokens ({args.max_tokens}) before answering" if finish == "length"
+                   else f"empty reply (finish_reason: {finish})")
+            print(f"  cut off: {why}. Lower the effort (/effort low or off) or raise --max-tokens.")
+            final = ("cutoff", why)
+            break
         messages.append({"role": "assistant", "content": content})
         kind, *rest = parse_reply(content)
         if kind in ("final", "ask"):
@@ -190,8 +232,11 @@ def agent_loop(page, args, messages, stats):
             break
         stats["steps"] += 1
         if kind == "broken":
-            print(f"    broken reply: {rest[0]}")
-            r = {"status": "error", "output": "Your reply had an unclosed code block; nothing was run.", "changes": []}
+            cut = finish == "length"
+            print(f"    broken reply: {rest[0]}{' (hit --max-tokens)' if cut else ''}")
+            msg = ("Your reply was cut off by the token limit inside the code block; nothing was run. Write shorter code."
+                   if cut else "Your reply had an unclosed code block; nothing was run.")
+            r = {"status": "error", "output": msg, "changes": []}
             messages.append({"role": "user", "content": observation(step, r)})
             continue
         code, n_blocks = rest
@@ -260,8 +305,9 @@ def run_custom(page, args):
         print(f"workspace: {', '.join(sorted(files))}")
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": args.task}]
     stats = new_stats()
+    print("  (at the prompt: /effort off|low|medium|high|default, /retry re-asks without a new message)")
+    final = agent_loop(page, args, messages, stats)
     while True:
-        final = agent_loop(page, args, messages, stats)
         prompt = "your answer> " if final and final[0] == "ask" else "follow-up (Enter to finish)> "
         try:
             reply = input("\n" + prompt).strip()
@@ -269,7 +315,21 @@ def run_custom(page, args):
             reply = ""
         if not reply:
             break
-        messages.append({"role": "user", "content": reply})
+        if reply.startswith("/effort"):
+            level = reply.split()[1] if len(reply.split()) > 1 else ""
+            if level in EFFORTS:
+                args.effort = level
+                print(f"  effort: {level}")
+            else:
+                print(f"  effort is {args.effort}; choose one of {', '.join(EFFORTS)}")
+            continue
+        if reply == "/retry":
+            if messages[-1]["role"] == "assistant":
+                print("  nothing to retry: the model already answered")
+                continue
+        else:
+            messages.append({"role": "user", "content": reply})
+        final = agent_loop(page, args, messages, stats)
 
     r = page.evaluate("([c, t]) => runStep(c, t)", [EXPORT_CODE, 60000])
     workspace = json.loads(r["output"]) if r["status"] == "ok" else {}
@@ -291,10 +351,14 @@ def main():
     ap.add_argument("--max-steps", type=int, default=10)
     ap.add_argument("--step-timeout", type=int, default=60, help="seconds per code step")
     ap.add_argument("--max-tokens", type=int, default=8192)
+    ap.add_argument("--effort", choices=EFFORTS, default="low",
+                    help="reasoning effort (default low; 'default' sends nothing, which is xhigh on Qwen3.8)")
     ap.add_argument("--only", help="run only tasks whose name contains this")
     ap.add_argument("--task", help="run your own task instead of the reference tasks")
     ap.add_argument("--file", action="append", help="file or folder to put in /workspace (repeatable, with --task)")
     args = ap.parse_args()
+    args.effort_levels = template_effort_levels(args.base_url)
+    print(f"reasoning effort: {args.effort} (template accepts: {', '.join(args.effort_levels) if args.effort_levels else 'unknown'})")
 
     results = []
     with sync_playwright() as pw:

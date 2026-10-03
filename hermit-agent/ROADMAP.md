@@ -53,6 +53,17 @@ headless Chromium):
   cost 3 steps, and the task hit the 10-step limit just as the tests went green. The
   harness should drop changed workspace modules from `sys.modules` after each step
   (§4.2).
+- **Reasoning effort matters a lot for agent loops.** With no setting, Qwen3.8's
+  template defaults to `xhigh`. One step of an open-ended task ("a complex hello world
+  in Java") spent the whole 8192-token budget on 35k chars of reasoning and returned
+  empty content. The spike now defaults to `low` (HermitUI's `buildReasoningParams`
+  mapping, levels read from `/props`), switchable with `/effort`, and reports a
+  cut-off instead of treating the empty reply as a final answer. The agent needs the
+  same control plus a cut-off state.
+- **Pyodide is 32-bit:** numpy's default integer is int32 and overflows silently. At
+  low effort the model returned the primes sum mod 2³² as a confident final answer;
+  at xhigh it had sanity-checked its result and caught it. One line in the system
+  prompt (§5.3) fixed it (3/3 runs).
 - llama.cpp returns the reasoning in `reasoning_content`, not inline `<think>`, so
   the timeline must read both. HermitUI's `fetchAndStreamChat` already does this
   (`reasoning_content` / `reasoning` / `thinking`, streamed and non-streamed), so
