@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Content-Security-Policy, part of the network guard (DESIGN §10). Agent code can
+         reach the worker's JS globals; worker.js closes fetch/XHR/WebSocket & co. while a
+         step runs, but dynamic import() can't be patched from JS. Blob-URL workers
+         inherit this policy, and script-src lists no remote host in the built file
+         (build.py swaps in a strict policy without the dev CDN hosts and local files),
+         so import("https://…") is refused there.
+         connect-src stays open: the LLM endpoint is user-configured at runtime, and
+         Pyodide packages load from the pinned CDN. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file: 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' file: 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src data: https://fonts.gstatic.com; img-src 'self' file: blob: data:; connect-src * blob: data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+    <title>HermitUI Agent</title>
+    <meta name="description" content="A supervised Python agent that runs entirely in your browser tab.">
+    <link rel="icon" href="favicon.svg">
+    <!-- Same pinned libraries (and SRI hashes) as HermitUI's src/index.html. -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@18.0.6/lib/marked.umd.js" integrity="sha384-uGn1eBC40GtuBgao0epc/cz9O4Lo8/flg/10SW+69UjLI5nP31iT4UPc65Xz10Le" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.12/dist/purify.min.js" integrity="sha384-piCcpDdJ7qVeK4Tv8Z6Hpcr3ZBIgP16TxQTPVfsLFdZ5uDgwc3Y8Ho7oUnqf12qu" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css" integrity="sha384-eFTL69TLRZTkNfYZOLM+G04821K1qZao/4QLJbet1pP4tcF+fdXq/9CdqAbWRl/L" crossorigin="anonymous">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js" integrity="sha384-RH2xi4eIQ/gjtbs9fUXM68sLSi99C7ZWBRX1vDrVv6GQXRibxXLbwO2NGZB74MbU" crossorigin="anonymous"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="app-header">
+        <div class="brand">
+            <h1>HermitUI Agent <span class="version-badge" id="versionBadge">v0.1.0</span></h1>
+            <span class="model-badge" id="modelBadge">🤖 model</span>
+        </div>
+        <div class="header-actions">
+            <button type="button" class="header-btn" id="newSessionBtn" title="New session">➕ New</button>
+            <button type="button" class="header-btn" id="importBtn" title="Import a session (.zip)">📂 Import</button>
+            <button type="button" class="header-btn" id="exportBtn" title="Export the session or the workspace">💾 Export</button>
+            <button type="button" class="header-btn icon-only" id="themeBtn" title="Toggle dark mode" aria-label="Toggle dark mode">🌓</button>
+            <button type="button" class="header-btn icon-only" id="settingsBtn" title="Settings" aria-label="Settings">⚙️</button>
+            <input type="file" id="importInput" accept=".zip,application/zip" hidden>
+        </div>
+    </header>
+    <div class="cloud-warning" id="cloudWarning" hidden></div>
+    <div class="status-bar" role="status">
+        <span class="stat" id="statState">ready</span>
+        <span class="stat" id="statStep">Step 0</span>
+        <span class="stat" id="statTime">⏱ 0s</span>
+        <span class="stat" id="statTokens">🔢 0 tokens</span>
+        <span class="stat" id="statInterp">🐍 not started</span>
+    </div>
+
+    <main class="layout">
+        <section class="timeline-pane">
+            <div class="timeline" id="timeline" aria-live="polite"></div>
+            <form class="composer" id="composer">
+                <div class="input-shell">
+                    <textarea id="taskInput" rows="2" placeholder="Describe a task…" aria-label="Task or message for the agent"></textarea>
+                    <div class="composer-toolbar">
+                        <label class="toolbar-field" title="How much the agent may do without asking you">
+                            <span>Supervision</span>
+                            <select id="autonomySelect">
+                                <option value="approve">Approve each step</option>
+                                <option value="risk">Risk-based</option>
+                                <option value="autopilot">Autopilot</option>
+                            </select>
+                        </label>
+                        <label class="toolbar-field" title="Reasoning effort for models that support it">
+                            <span>Reasoning</span>
+                            <select id="effortSelect">
+                                <option value="default">Model default</option>
+                                <option value="off">Off</option>
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                            </select>
+                        </label>
+                        <div class="composer-actions">
+                            <button type="button" class="action-btn" id="killBtn" title="Terminate the Python interpreter now (the workspace survives, variables don't)">☠️ Kill</button>
+                            <button type="button" class="action-btn" id="stopBtn" hidden title="Stop after the running step">⏹ Stop</button>
+                            <button type="button" class="action-btn" id="continueBtn" hidden title="Resume the agent">⏯ Continue</button>
+                            <button type="submit" class="action-btn primary" id="sendBtn">▶ Start</button>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </section>
+
+        <aside class="workspace-pane" id="workspacePane" aria-label="Workspace">
+            <div class="ws-header">
+                <h2>Workspace</h2>
+                <span class="hint" id="wsSummary"></span>
+            </div>
+            <div class="ws-actions">
+                <button type="button" class="small-btn" id="wsUploadBtn" title="Add files">📎 Files</button>
+                <button type="button" class="small-btn" id="wsFolderBtn" title="Add a folder">📁 Folder</button>
+                <button type="button" class="small-btn" id="wsDownloadBtn" title="Download the workspace as a zip">⬇️ Zip</button>
+                <input type="file" id="wsFileInput" multiple hidden>
+                <input type="file" id="wsFolderInput" webkitdirectory multiple hidden>
+            </div>
+            <div class="ws-tree" id="wsTree"></div>
+            <p class="ws-note" id="networkNote">🔒 Agent code runs in a WebAssembly Python inside this tab: it can't touch your disk or other tabs, and changes to your files need your approval. Network access from agent code is blocked on a best-effort basis, so don't add secrets you couldn't afford to leak.</p>
+        </aside>
+    </main>
+
+    <!-- Settings -->
+    <div class="modal-overlay" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="modal">
+            <h3 id="settingsTitle">Settings</h3>
+            <p class="hint">Held in memory only. Nothing is saved when you close the tab.</p>
+            <label for="settingUrl">API Base URL</label>
+            <input type="text" id="settingUrl" placeholder="http://localhost:8080/v1" autocomplete="off" spellcheck="false">
+            <label for="settingModelInput">Model</label>
+            <input type="text" id="settingModelInput" placeholder="model name (blank: the server's default)" autocomplete="off" spellcheck="false">
+            <select id="settingModelSelect" hidden></select>
+            <label for="settingApiKey">API Key</label>
+            <input type="password" id="settingApiKey" placeholder="optional" autocomplete="off">
+            <div class="modal-row">
+                <button type="button" class="small-btn" id="testConnectionBtn">🔌 Test Connection</button>
+                <span class="hint" id="reasoningStatus"></span>
+            </div>
+            <label for="settingInstructions">Custom instructions</label>
+            <textarea id="settingInstructions" rows="3" placeholder="Appended to the agent's system prompt, e.g. &quot;Prefer pandas. Write a short report.md at the end.&quot;"></textarea>
+            <div class="modal-grid">
+                <div>
+                    <label for="settingStepLimit">Step limit</label>
+                    <input type="number" id="settingStepLimit" min="1" max="500">
+                </div>
+                <div>
+                    <label for="settingTimeout">Step timeout (s)</label>
+                    <input type="number" id="settingTimeout" min="1" max="3600">
+                </div>
+                <div>
+                    <label for="settingMaxTokens">Max tokens / reply</label>
+                    <input type="number" id="settingMaxTokens" min="0" title="0 = don't send a limit">
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="cancel-btn" id="settingCancel">Cancel</button>
+                <button type="button" class="primary" id="settingSave">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- File viewer -->
+    <div class="modal-overlay" id="viewerModal" role="dialog" aria-modal="true" aria-labelledby="viewerTitle">
+        <div class="modal modal-wide">
+            <h3 id="viewerTitle">file</h3>
+            <p class="hint" id="viewerMeta"></p>
+            <div class="viewer-body" id="viewerBody"></div>
+            <div class="modal-actions">
+                <button type="button" class="cancel-btn" id="viewerDownload">⬇️ Download</button>
+                <button type="button" class="primary" id="viewerClose">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export -->
+    <div class="modal-overlay" id="exportModal" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+        <div class="modal">
+            <h3 id="exportTitle">Export</h3>
+            <p>A <b>session</b> export is one .zip with the task, every step, the model history and the workspace files, which you can import again later. The API key is never included.</p>
+            <label class="check-row"><input type="checkbox" id="exportCheckpoints" checked> Include checkpoints (lets you rewind after importing; larger file)</label>
+            <div class="modal-actions">
+                <button type="button" class="cancel-btn" id="exportCancel">Cancel</button>
+                <button type="button" class="cancel-btn" id="exportWorkspaceBtn">Workspace only</button>
+                <button type="button" class="primary" id="exportSessionBtn">Export session</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm -->
+    <div class="modal-overlay" id="confirmModal" role="alertdialog" aria-modal="true" aria-labelledby="confirmText">
+        <div class="modal">
+            <p id="confirmText"></p>
+            <div class="modal-actions">
+                <button type="button" class="cancel-btn" id="confirmCancel">Cancel</button>
+                <button type="button" class="primary" id="confirmOk">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- @pyodide:inline -->
+    <script src="worker.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

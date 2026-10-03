@@ -1,0 +1,171 @@
+// Zip writer/reader and the session archive (DESIGN §3): round-trips, the untrusted-input
+// rules on import, and the version policy. Run: node tests/archive.test.mjs
+import { check, section, report } from "./check.mjs";
+import X from "./extract.mjs";
+
+const enc = new TextEncoder(), dec = new TextDecoder();
+const eq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+async function rejects(name, promise, fragment) {
+    try { await promise; check(name, false, "did not throw"); }
+    catch (e) { check(name, !fragment || String(e.message).includes(fragment), e.message); }
+}
+
+// A hand-built single-entry zip (stored), for archives the writer would never produce.
+function rawZip(name, data, { crc } = {}) {
+    const n = enc.encode(name);
+    const c = crc ?? X.crc32(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint32(14, c, true);
+    lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true); lh.setUint16(26, n.length, true);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint32(16, c, true);
+    ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true); ch.setUint16(28, n.length, true);
+    const cdOff = 30 + n.length + data.length;
+    const eo = new DataView(new ArrayBuffer(22));
+    eo.setUint32(0, 0x06054b50, true); eo.setUint16(8, 1, true); eo.setUint16(10, 1, true);
+    eo.setUint32(12, 46 + n.length, true); eo.setUint32(16, cdOff, true);
+    const parts = [new Uint8Array(lh.buffer), n, data, new Uint8Array(ch.buffer), n, new Uint8Array(eo.buffer)];
+    const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+    let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+}
+
+section("1. crc32");
+check("known vector", X.crc32(enc.encode("123456789")) === 0xCBF43926);
+
+section("2. zip round-trip");
+{
+    const binary = new Uint8Array(4096).map((_, i) => (i * 131) & 255);
+    const entries = [
+        { path: "hello.txt", data: enc.encode("hello world\n".repeat(200)) },
+        { path: "bin/data.bin", data: binary },
+        { path: "ünïcödé/日本語.md", data: enc.encode("# hi") },
+        { path: "empty.txt", data: new Uint8Array(0) },
+    ];
+    const zip = await X.zipWrite(entries, new Date(2026, 9, 3, 14, 30, 10));
+    check("compressible text is deflated", zip.length < 2400 + 4096 + 400, zip.length);
+    const back = await X.zipRead(zip);
+    check("same entry count", back.length === entries.length);
+    for (const e of entries) {
+        const b = back.find(x => x.path === e.path);
+        check(`round-trips ${e.path}`, b && eq(b.data, e.data));
+    }
+}
+
+section("3. zipRead treats archives as untrusted (DESIGN §3.3)");
+{
+    await rejects("traversal path", X.zipRead(rawZip("../evil.txt", enc.encode("x"))), "Unsafe path");
+    await rejects("absolute path", X.zipRead(rawZip("/etc/passwd", enc.encode("x"))), "Unsafe path");
+    await rejects("backslash path", X.zipRead(rawZip("a\\..\\b", enc.encode("x"))), "Unsafe path");
+    await rejects("CRC mismatch", X.zipRead(rawZip("a.txt", enc.encode("x"), { crc: 1234 })), "CRC mismatch");
+    await rejects("not a zip", X.zipRead(enc.encode("definitely not a zip file, just text that is long enough")), "Not a zip");
+    const zip = await X.zipWrite([{ path: "a", data: new Uint8Array(5000) }, { path: "b", data: new Uint8Array(5000) }]);
+    await rejects("total size limit (zip bomb guard)", X.zipRead(zip, { maxBytes: 8000 }), "unpacks to more than");
+    await rejects("entry count limit", X.zipRead(zip, { maxEntries: 1 }), "entries");
+    // A deflated entry that inflates beyond its declared size must not be trusted.
+    const big = await X.zipWrite([{ path: "z", data: new Uint8Array(100000) }]);
+    const dv = new DataView(big.buffer);
+    const eocd = big.length - 22, cd = dv.getUint32(eocd + 16, true);
+    dv.setUint32(cd + 24, 10, true);   // central directory now claims 10 bytes
+    await rejects("lying uncompressed size", X.zipRead(big), "declared size");
+    const dirs = await X.zipRead(rawZip("folder/", new Uint8Array(0)));
+    check("directory entries are skipped", dirs.length === 0);
+}
+
+section("4. Session archive round-trip (DESIGN §3.1)");
+{
+    const files = {
+        "data.csv": { bytes: enc.encode("a,b\n1,2\n"), origin: "user" },
+        "out/report.md": { bytes: enc.encode("# Report ```"), origin: "agent" },
+        "bin.dat": { bytes: new Uint8Array([0, 255, 1, 254]), origin: "agent" },
+    };
+    const blobs = new Map(), fileMap = new Map();
+    for (const [p, f] of Object.entries(files)) {
+        const h = await X.sha256Hex(f.bytes);
+        blobs.set(h, f.bytes);
+        fileMap.set(p, { hash: h, origin: f.origin });
+    }
+    const oldBytes = enc.encode("old version of the report");
+    const oldHash = await X.sha256Hex(oldBytes);
+    blobs.set(oldHash, oldBytes);
+    const checkpoints = [
+        { timelineLength: 1, msgCount: 2, stepCount: 0, label: "start", files: { "data.csv": { hash: fileMap.get("data.csv").hash, origin: "user" } } },
+        { timelineLength: 2, msgCount: 4, stepCount: 1, label: "step 1", files: { "data.csv": { hash: fileMap.get("data.csv").hash, origin: "user" }, "out/report.md": { hash: oldHash, origin: "agent" } } },
+    ];
+    const session = {
+        task: "Summarise data.csv", createdAt: "2026-10-03T12:00:00.000Z", status: "done",
+        messages: [{ role: "system", content: "sys" }, { role: "user", content: "Task: x" }, { role: "assistant", content: "```python\nprint(1)\n```" }, { role: "user", content: "<observation>" }],
+        timeline: [
+            { type: "task", text: "Summarise data.csv", files: ["data.csv"], ts: "t0", checkpoint: 0 },
+            { type: "step", n: 1, kind: "code", phase: "done", reasoning: "think", proposedCode: "print(1)\n", output: "1\n", status: "ok",
+              changes: { added: [{ path: "out/report.md", hash: oldHash, size: 25 }], modified: [], deleted: [] },
+              risk: { verdict: "auto", reasons: [] }, decision: "auto", decidedBy: "auto", notes: ["Loaded numpy"], checkpoint: 1, _held: ["x"], _draft: "secret draft" },
+            { type: "user", kind: "guidance", text: "use pandas" },
+            { type: "note", text: "⏪ rewound", tone: "info" },
+        ],
+        stepCount: 1, tokens: { prompt: 100, completion: 20 }, activeMs: 1234,
+        settings: { apiUrl: "http://localhost:8080/v1", model: "qwen", autonomy: "risk", stepLimit: 20, stepTimeoutSec: 60, maxTokens: 8192, effort: "low" },
+    };
+    const state = { session, files: fileMap, blobs, checkpoints };
+
+    const entries = X.buildSessionArchive(state, { includeCheckpoints: true, now: "2026-10-03T13:00:00.000Z" });
+    const names = entries.map(e => e.path);
+    check("archive layout", ["manifest.json", "session.json", "transcript.md", "workspace/data.csv", "workspace/out/report.md", "workspace/bin.dat", "checkpoints/index.json", "checkpoints/blobs/" + oldHash].every(n => names.includes(n)), names);
+    check("checkpoint blobs already in workspace/ aren't repeated", names.filter(n => n.startsWith("checkpoints/blobs/")).length === 1);
+    const sessionText = dec.decode(entries.find(e => e.path === "session.json").data);
+    check("runtime-only fields are stripped", !sessionText.includes("secret draft") && !sessionText.includes("_held"));
+    check("no API key field is ever written", !/apiKey/i.test(sessionText));
+    const transcript = dec.decode(entries.find(e => e.path === "transcript.md").data);
+    check("transcript is readable Markdown", transcript.includes("## Task") && transcript.includes("## Step 1 — code · ok · auto"));
+
+    const zip = await X.zipWrite(entries);
+    const back = await X.parseSessionArchive(await X.zipRead(zip));
+    check("task and messages survive", back.session.task === session.task && JSON.stringify(back.session.messages) === JSON.stringify(session.messages));
+    check("timeline survives (minus runtime fields)", back.session.timeline.length === 4 && back.session.timeline[1].output === "1\n" && back.session.timeline[1]._draft === undefined);
+    check("checkpoint links survive", back.session.timeline[0].checkpoint === 0 && back.session.timeline[1].checkpoint === 1);
+    check("step changes survive", back.session.timeline[1].changes.added[0].path === "out/report.md");
+    check("workspace files and origins", back.files.size === 3 && back.files.get("data.csv").origin === "user" && back.files.get("bin.dat").origin === "agent");
+    check("binary content intact", eq(back.blobs.get(back.files.get("bin.dat").hash), files["bin.dat"].bytes));
+    check("checkpoints restored with their blobs", back.checkpoints.length === 2 && eq(back.blobs.get(back.checkpoints[1].files["out/report.md"].hash), oldBytes));
+    check("settings restored", back.session.settings.autonomy === "risk" && back.session.settings.model === "qwen");
+
+    const noCp = await X.parseSessionArchive(await X.zipRead(await X.zipWrite(X.buildSessionArchive(state, { includeCheckpoints: false }))));
+    check("export without checkpoints imports", noCp.checkpoints.length === 0 && noCp.files.size === 3);
+
+    // Tampering
+    const tamper = async (mutate) => {
+        const es = X.buildSessionArchive(state, { includeCheckpoints: true }).map(e => ({ ...e }));
+        mutate(es);
+        return X.parseSessionArchive(await X.zipRead(await X.zipWrite(es)));
+    };
+    await rejects("checkpoint blob with wrong content", tamper(es => { es.find(e => e.path.startsWith("checkpoints/blobs/")).data = enc.encode("evil"); }), "does not match");
+    await rejects("checkpoint pointing at missing content", tamper(es => { es.splice(es.findIndex(e => e.path.startsWith("checkpoints/blobs/")), 1); }), "missing content");
+    await rejects("checkpoint past the end of the session", tamper(es => {
+        const i = es.findIndex(e => e.path === "checkpoints/index.json");
+        const cps = JSON.parse(dec.decode(es[i].data)); cps[0].timelineLength = 99; es[i].data = enc.encode(JSON.stringify(cps));
+    }), "past the end");
+    await rejects("missing manifest", tamper(es => { es.splice(es.findIndex(e => e.path === "manifest.json"), 1); }), "not a HermitUI Agent session");
+    await rejects("newer format version", tamper(es => {
+        const i = es.findIndex(e => e.path === "manifest.json");
+        es[i].data = enc.encode(JSON.stringify({ format: "hermit-agent-session", formatVersion: 99 }));
+    }), "newer HermitUI Agent");
+    await rejects("session.json not JSON", tamper(es => { es.find(e => e.path === "session.json").data = enc.encode("{nope"); }), "not valid JSON");
+}
+
+section("5. validateSession");
+{
+    const base = { task: "t", messages: [], timeline: [] };
+    const bad = (name, v, frag) => { try { X.validateSession(v); check(name, false, "accepted"); } catch (e) { check(name, e.message.includes(frag), e.message); } };
+    bad("missing task", { messages: [], timeline: [] }, "'task'");
+    bad("missing messages", { task: "t", timeline: [] }, "'messages'");
+    bad("bad role", { ...base, messages: [{ role: "tool", content: "x" }] }, "message 0");
+    bad("unknown timeline type", { ...base, timeline: [{ type: "script" }] }, "unknown type");
+    const v = X.validateSession({ ...base, extra: "ignored", timeline: [{ type: "step", n: 1, phase: "pending-approval", output: 42, notes: ["a", 3], onclick: "x" }], origins: { "../x": "user", "ok.txt": "agent", "y": "root" } });
+    check("unknown fields ignored", !("extra" in v) && !("onclick" in v.timeline[0]));
+    check("a step waiting at export time restores as interrupted", v.timeline[0].phase === "done" && v.timeline[0].status === "interrupted");
+    check("fields coerced to their types", v.timeline[0].output === "42" && JSON.stringify(v.timeline[0].notes) === '["a"]');
+    check("unsafe or invalid origins dropped", JSON.stringify(v.origins) === '{"ok.txt":"agent"}');
+    check("defaults filled in", v.status === "paused" && v.settings.autonomy === "risk" && v.settings.stepLimit === 20);
+}
+
+report();
