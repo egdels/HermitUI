@@ -12,7 +12,8 @@
     <a href="#-in-browser-inference">In-Browser AI</a> •
     <a href="#-benchmarks">Benchmarks</a> •
     <a href="#-connect-to-your-own-endpoint">Connect a server</a> •
-    <a href="#-features">Features</a>
+    <a href="#-features">Features</a> •
+    <a href="#-new-hermitui-agent-preview">🤖 Agent</a>
   </p>
 </div>
 
@@ -41,6 +42,8 @@ Two things set it apart, and the combination is the point:
 Or ignore all of that and point it at LM Studio, Ollama, llama.cpp, or vLLM as a [normal client](#-connect-to-your-own-endpoint).
 
 Built for the machines where nothing else fits: air-gapped boxes, locked-down corporate and government networks, shared kiosks and hot desks.
+
+**New:** [🤖 **HermitUI Agent**](#-new-hermitui-agent-preview), a supervised coding agent with its own Python sandbox, in the same one-file, store-nothing spirit.
 
 ## ⚡ Try it in 60 seconds
 
@@ -301,6 +304,22 @@ If HermitUI fails to connect to your local AI server (e.g., a "Network Error"), 
 *   **⚙️ Customizable settings:** API URL, model name, API key, and system prompt via the on-page settings overlay.
 
 </details>
+
+## 🤖 New: HermitUI Agent (preview)
+
+Chat is great, but sometimes you want the model to actually *do* the work. **[HermitUI Agent](hermit-agent/)** is a sibling app: a supervised, sandboxed agent that runs entirely in your browser — again as **one `.html` file** (≈ 9 MB, Python included).
+
+Give it a task — *"clean up these CSVs and chart the monthly totals"*, *"write and test a parser for this log format"* — and it works step by step: it writes Python, runs it in a WebAssembly interpreter (Pyodide) against an in-memory workspace, reads the output and decides what to do next. Unlike CLI agents, **you stay in control**:
+
+*   **👀 Every step is visible:** the model's reasoning, the exact code, the output, and a diff of the files it changed.
+*   **✋ Risky steps wait for you:** harmless steps run on their own; anything that overwrites or deletes your files, or tries to reach the network, is held for approval.
+*   **⏪ Every step can be undone:** the workspace is checkpointed after each step, and you can rewind to any of them.
+*   **🧱 It can't touch your machine:** the agent only sees the files you drop into its workspace, and that workspace is gone when you close the tab.
+*   **💾 Sessions go where you put them:** export the whole session (steps, history, workspace, checkpoints) to one `.zip` and import it later — or hit **➕ New** to start a clean session on the same files.
+
+<a href="https://moooff.github.io/HermitUI/hermit-agent/dist/hermit-agent-standalone.html"><img src="https://img.shields.io/badge/🤖_Try_HermitUI_Agent-1f6feb?style=for-the-badge" alt="Try HermitUI Agent" /></a>
+
+It needs an OpenAI-compatible endpoint (e.g. `llama-server -m model.gguf --jinja --port 8080`) and a model that can recover from its own errors — the reference tasks pass with Qwen3.8-27B. Network blocking inside the sandbox is **best-effort** (17 known paths tested and closed, but a denylist, not a guarantee), so don't put secrets in the workspace. Details in the [agent README](hermit-agent/README.md) and [design doc](hermit-agent/DESIGN.md).
 
 ## 🔗 Configuration via URL
 
