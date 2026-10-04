@@ -4535,6 +4535,11 @@ function submitUserText(text) {
     runLoop();
 }
 
+// True while the run sits at the step limit, where Continue allows a few more steps.
+function atStepLimit() {
+    return !RUN.active && S.status === "paused" && S.stepCount >= S.stepBudget;
+}
+
 // Never lowers the budget: Continue after a Stop or an error mid-budget keeps what's left.
 function continueAfterLimit() {
     S.stepBudget = Math.max(S.stepBudget, S.stepCount + LIMITS.stepLimitIncrement);
@@ -4548,11 +4553,16 @@ async function runLoop() {
     RUN.overflowRetried = false;
     RUN.activeSince = Date.now();
     setStatus("running");
+    // The step-limit note carries its own Continue button: drop it now the run is on
+    // (a follow-up may sit after the note, but no step does).
+    for (let i = S.timeline.length - 1; i >= 0 && S.timeline[i].type !== "step"; i--) {
+        if (S.timeline[i].limit) renderTimelineItem(i);
+    }
     try {
         for (;;) {
             if (RUN.stopRequested) { addNote("⏹ Stopped by the user."); setStatus("stopped"); break; }
             if (S.stepCount >= S.stepBudget) {
-                addNote(`⏸ Step limit reached (${S.stepCount} steps). Press Continue to allow ${LIMITS.stepLimitIncrement} more, or send a follow-up.`, "warn");
+                addTimelineItem({ type: "note", tone: "warn", limit: true, text: `⏸ Step limit reached (${S.stepCount} steps). Press Continue to allow ${LIMITS.stepLimitIncrement} more, or send a follow-up.` });
                 setStatus("paused");
                 break;
             }
@@ -5409,6 +5419,7 @@ function buildCard(item, idx, old) {
     }
     const card = el("article", "card note-card tone-" + (item.tone || "info"));
     card.appendChild(el("p", "", item.text));
+    if (item.limit && idx === S.timeline.length - 1 && atStepLimit()) card.appendChild(button("⏯ Continue", "continue", idx, "primary", `Allow ${LIMITS.stepLimitIncrement} more steps`));
     return card;
 }
 
@@ -5958,6 +5969,7 @@ function handleTimelineClick(e) {
     if (action === "view-file") { openViewer(b.dataset.path, b.dataset.hash); return; }
     if (action === "rewind") { rewindTo(idx); return; }
     if (action === "retry") { S.timeline.splice(idx, 1); renderTimeline(); runLoop(); return; }
+    if (action === "continue") { if (atStepLimit()) continueAfterLimit(); return; }
     if (!RUN.decision || RUN.decision.idx !== idx) return;
     if (action === "run") resolveDecision({ action: "run", code: code !== null ? code : item.proposedCode });
     else if (action === "approve") resolveDecision({ action: "approve" });
@@ -6001,7 +6013,7 @@ function wireEvents() {
     $("stopBtn").addEventListener("click", stopRun);
     $("killBtn").addEventListener("click", killInterpreter);
     $("continueBtn").addEventListener("click", () => {
-        if (S.status === "paused" && S.stepCount >= S.stepBudget) continueAfterLimit();
+        if (atStepLimit()) continueAfterLimit();
         else submitUserText("");
     });
     $("autonomySelect").addEventListener("change", (e) => { SETTINGS.autonomy = e.target.value; });

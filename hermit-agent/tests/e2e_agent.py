@@ -130,6 +130,7 @@ print(len(rows), total)
             py('import pathlib\npathlib.Path("reader.py").write_text("import csv\\n")\nprint("saved")'),
             final("Created `reader.py`."),
         ],
+        "E2E-LIMIT": [py(f"print('limit {i}')") for i in range(1, 4)] + [final("Done past the limit.")],
         "E2E-AUTO": [
             py('import os\nos.remove("data.csv")\nprint("gone")'),
             final("Removed it."),
@@ -558,6 +559,30 @@ def autopilot_scenario(browser, port, state):
     page.context.close()
 
 
+def step_limit_scenario(browser, port, state):
+    print("— step limit: the note's own Continue button resumes the run")
+    page = open_app(browser)
+    configure(page, port, 10)
+    page.click("#settingsBtn")
+    page.fill("#settingStepLimit", "2")
+    page.click("#settingSave")
+    page.fill("#taskInput", "E2E-LIMIT: count")
+    page.click("#sendBtn")
+    wait_until(page, "() => S.status === 'paused' && !RUN.active", 60, "step limit")
+    inline = page.locator(".note-card [data-action=continue]")
+    check("the step-limit note shows a Continue button", inline.count() == 1 and step_count(page) == 2, (inline.count(), step_count(page)))
+    check("…next to the composer's", page.is_visible("#continueBtn"))
+    inline.click()
+    check("…which goes away as soon as the run resumes", inline.count() == 0)
+    wait_until(page, "() => S.status === 'done'", 60, "final after continue")
+    check("Continue allowed more steps and the task finished", step_count(page) == 4 and inline.count() == 0, step_count(page))
+    page.context.close()
+
+
+def step_count(page):
+    return page.evaluate("() => S.stepCount")
+
+
 def compaction_scenario(browser, port, state):
     print("— auto-compaction: threshold, a second pass, rewind across it, overflow retry")
     page = open_app(browser)
@@ -623,6 +648,7 @@ def main():
                     import_scenario(browser, port, state, *exported)
                 approve_scenario(browser, port, state)
                 autopilot_scenario(browser, port, state)
+                step_limit_scenario(browser, port, state)
                 streaming_scenario(browser, port, state)
                 phantom_scenario(browser, port, state)
                 files_scenario(browser, port, state, downloads=not exe)
