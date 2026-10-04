@@ -29,7 +29,10 @@
   <a href="https://moooff.github.io/HermitUI/dist/hermit-ui-wllama.html#gguf=hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf">
     <img src="https://img.shields.io/badge/🧠_Try_the_In--Browser_AI_Demo-8A2BE2?style=for-the-badge" alt="Try the In-Browser AI Demo" />
   </a>
-  <p><i>Left: connect it to your local AI server. Right: one click downloads a small but capable model (Qwen3-0.6B, ~380 MB) and chats <b>fully inside your browser</b> — no server at all.</i></p>
+  <a href="https://moooff.github.io/HermitUI/hermit-agent/dist/hermit-agent-standalone.html">
+    <img src="https://img.shields.io/badge/🤖_Try_HermitUI_Agent-1f6feb?style=for-the-badge" alt="Try HermitUI Agent" />
+  </a>
+  <p><i>Left: connect it to your local AI server. Middle: one click downloads a small but capable model (Qwen3-0.6B, ~380 MB) and chats <b>fully inside your browser</b> — no server at all. Right: <a href="#-new-hermitui-agent-preview">the agent</a> — hand a task to your model and watch it solve it step by step in a Python sandbox.</i></p>
 </div>
 
 HermitUI is a chat interface that is **one `.html` file**. No install, no server, no build step, no npm — double-click it and it opens.
@@ -316,8 +319,6 @@ Give it a task — *"clean up these CSVs and chart the monthly totals"*, *"write
 *   **⏪ Every step can be undone:** the workspace is checkpointed after each step, and you can rewind to any of them.
 *   **🧱 It can't touch your machine:** the agent only sees the files you drop into its workspace, and that workspace is gone when you close the tab.
 *   **💾 Sessions go where you put them:** export the whole session (steps, history, workspace, checkpoints) to one `.zip` and import it later — or hit **➕ New** to start a clean session on the same files.
-
-<a href="https://moooff.github.io/HermitUI/hermit-agent/dist/hermit-agent-standalone.html"><img src="https://img.shields.io/badge/🤖_Try_HermitUI_Agent-1f6feb?style=for-the-badge" alt="Try HermitUI Agent" /></a>
 
 It needs an OpenAI-compatible endpoint (e.g. `llama-server -m model.gguf --jinja --port 8080`) and a model that can recover from its own errors — the reference tasks pass with Qwen3.8-27B. Network blocking inside the sandbox is **best-effort** (17 known paths tested and closed, but a denylist, not a guarantee), so don't put secrets in the workspace. Details in the [agent README](hermit-agent/README.md) and [design doc](hermit-agent/DESIGN.md).
 
